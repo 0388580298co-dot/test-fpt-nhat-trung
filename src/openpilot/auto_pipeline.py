@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ai_content import generate_package, synthesize_speech, translate_segments
+from .douyin_source import acquire_douyin
 from .media import make_vertical, probe
 from .official_publishers import publish_tiktok, publish_youtube
 from .subtitles import write_srt
@@ -72,7 +73,10 @@ def discover_trend() -> str:
     if not key:
         return _discover_trend_from_news(query)
     params = urllib.parse.urlencode({"part": "snippet", "q": query, "type": "video", "order": "date", "maxResults": "10", "key": key})
-    data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}", api_name="YouTube API")
+    try:
+        data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}", api_name="YouTube API")
+    except RuntimeError:
+        return _discover_trend_from_news(query)
     items = data.get("items", [])
     if not items:
         return _discover_trend_from_news(query)
@@ -138,21 +142,34 @@ def _acquire_commons_video(query: str, output_dir: Path) -> tuple[Path, str]:
 
 
 def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
-    key = os.getenv("PEXELS_API_KEY")
-    if key:
-        params = urllib.parse.urlencode({"query": query, "per_page": "10", "orientation": "portrait"})
-        data = _get_json(
-            f"https://api.pexels.com/videos/search?{params}",
-            headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.5"},
-            api_name="Pexels API",
-        )
-        for item in data.get("videos", []):
-            for file_info in item.get("video_files", []):
-                link = file_info.get("link")
-                if not link or file_info.get("width", 0) < 720:
-                    continue
-                target = output_dir / f"source-{item['id']}.mp4"
-                return _download(link, target, "Pexels"), link
+    """Prefer public Douyin discovery, then use existing free fallbacks.
+
+    The Douyin adapter uses ordinary public search/download access only. It does
+    not pass cookies, login credentials, CAPTCHA workarounds, or anti-bot bypasses.
+    """
+    source = os.getenv("OPENPILOT_SOURCE", "douyin").lower()
+    if source in {"douyin", "auto"}:
+        try:
+            return acquire_douyin(query, output_dir / "douyin", limit=10)
+        except RuntimeError:
+            if source == "douyin":
+                raise
+    if source in {"pexels", "auto", "fallback"}:
+        key = os.getenv("PEXELS_API_KEY")
+        if key:
+            params = urllib.parse.urlencode({"query": query, "per_page": "10", "orientation": "portrait"})
+            data = _get_json(
+                f"https://api.pexels.com/videos/search?{params}",
+                headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.5"},
+                api_name="Pexels API",
+            )
+            for item in data.get("videos", []):
+                for file_info in item.get("video_files", []):
+                    link = file_info.get("link")
+                    if not link or file_info.get("width", 0) < 720:
+                        continue
+                    target = output_dir / f"source-{item['id']}.mp4"
+                    return _download(link, target, "Pexels"), link
     return _acquire_commons_video(query, output_dir)
 
 
