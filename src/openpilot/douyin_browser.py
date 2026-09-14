@@ -24,19 +24,16 @@ def _chrome_executable() -> str | None:
     return None
 
 
-def browser_media_urls(url: str, timeout_ms: int = 45000) -> list[str]:
-    """Extract media URLs from the normal rendered public Douyin page.
-
-    This fallback exists because the current yt-dlp Douyin extractor can fail
-    with "Fresh cookies" even for public videos. It does not solve CAPTCHAs,
-    bypass access controls, or call private APIs.
-    """
+def browser_media_urls(url: str, timeout_ms: int = 60000) -> list[str]:
+    """Extract media URLs exposed by a normal rendered public Douyin page."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
+        print("[DOUYIN-BROWSER] Playwright is not installed", flush=True)
         return []
 
     executable = _chrome_executable()
+    captured: list[str] = []
     try:
         with sync_playwright() as playwright:
             kwargs = {"headless": True}
@@ -48,8 +45,25 @@ def browser_media_urls(url: str, timeout_ms: int = 45000) -> list[str]:
                 locale="zh-CN",
             )
             page = context.new_page()
+
+            def on_response(response) -> None:
+                try:
+                    value = response.url
+                    content_type = (response.headers.get("content-type") or "").lower()
+                    if ("video/" in content_type or "mpegurl" in content_type or ".mp4" in value.lower() or ".m3u8" in value.lower() or "/play/" in value.lower() or "playwm" in value.lower()):
+                        captured.append(value)
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(6000)
+            page.wait_for_timeout(8000)
+            try:
+                page.mouse.wheel(0, 900)
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
             values = page.evaluate("""
                 () => {
                     const out = [];
@@ -61,22 +75,21 @@ def browser_media_urls(url: str, timeout_ms: int = 45000) -> list[str]:
                     document.querySelectorAll('[src], [data-src], [data-url], [href]').forEach(el => {
                         for (const key of ['src', 'data-src', 'data-url', 'href']) {
                             const value = el.getAttribute(key);
-                            if (value && (value.includes('.mp4') || value.includes('.m3u8') || value.includes('playwm') || value.includes('play/'))) add(value);
+                            if (value && (value.includes('.mp4') || value.includes('.m3u8') || value.includes('playwm') || value.includes('/play/'))) add(value);
                         }
                     });
-                    for (const entry of performance.getEntriesByType('resource')) {
-                        add(entry.name);
-                    }
+                    for (const entry of performance.getEntriesByType('resource')) add(entry.name);
                     add(document.documentElement.innerHTML);
                     return out;
                 }
             """)
             browser.close()
-    except Exception:
+    except Exception as exc:
+        print(f"[DOUYIN-BROWSER] Browser error: {exc}", flush=True)
         return []
 
     found: list[str] = []
-    for value in values:
+    for value in list(captured) + list(values):
         value = html.unescape(value).replace(r"\/", "/").replace(r"\u002F", "/")
         for item in MEDIA_URL_RE.findall(value):
             item = item.rstrip("\\\"'<>),;]")
