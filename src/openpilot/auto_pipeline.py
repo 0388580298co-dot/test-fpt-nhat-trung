@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -29,10 +30,20 @@ class AutoResult:
     published: str = ""
 
 
-def _get_json(url: str, headers: dict[str, str] | None = None) -> dict:
+def _http_detail(exc: urllib.error.HTTPError) -> str:
+    detail = exc.read().decode("utf-8", errors="replace").strip()
+    return detail[:600] if detail else str(exc.reason)
+
+
+def _get_json(url: str, headers: dict[str, str] | None = None, api_name: str = "API") -> dict:
     request = urllib.request.Request(url, headers=headers or {"User-Agent": "OpenPilot-Studio/0.5"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"{api_name} {exc.code}: {_http_detail(exc)}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"{api_name} connection error: {exc.reason}") from exc
 
 
 def discover_trend() -> str:
@@ -41,10 +52,10 @@ def discover_trend() -> str:
     if not key:
         raise RuntimeError("Missing YOUTUBE_API_KEY. Add an official YouTube Data API key first.")
     params = urllib.parse.urlencode({"part": "snippet", "q": query, "type": "video", "order": "date", "maxResults": "10", "key": key})
-    data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}")
+    data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}", api_name="YouTube API")
     items = data.get("items", [])
     if not items:
-        raise RuntimeError("Trend Engine found no recent videos for the configured query.")
+        raise RuntimeError("YouTube API: Trend Engine found no recent videos for the configured query.")
     return items[0].get("snippet", {}).get("title", query)
 
 
@@ -63,7 +74,11 @@ def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
     if not key:
         raise RuntimeError("Missing PEXELS_API_KEY. Configure a permitted video source before auto mode.")
     params = urllib.parse.urlencode({"query": query, "per_page": "10", "orientation": "portrait"})
-    data = _get_json(f"https://api.pexels.com/videos/search?{params}", headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.5"})
+    data = _get_json(
+        f"https://api.pexels.com/videos/search?{params}",
+        headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.5"},
+        api_name="Pexels API",
+    )
     for item in data.get("videos", []):
         for file_info in item.get("video_files", []):
             link = file_info.get("link")
@@ -72,12 +87,17 @@ def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
             output_dir.mkdir(parents=True, exist_ok=True)
             target = output_dir / f"source-{item['id']}.mp4"
             request = urllib.request.Request(link, headers={"User-Agent": "OpenPilot-Studio/0.5"})
-            with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as stream:
-                stream.write(response.read())
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as stream:
+                    stream.write(response.read())
+            except urllib.error.HTTPError as exc:
+                raise RuntimeError(f"Pexels media {exc.code}: {_http_detail(exc)}") from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Pexels media connection error: {exc.reason}") from exc
             # Stock footage is allowed to be silent. Keep it and let the AI voice
             # become the narration source instead of forcing Whisper to decode it.
             return target, link
-    raise RuntimeError("The permitted video source returned no usable video.")
+    raise RuntimeError("Pexels API: the permitted video source returned no usable video.")
 
 
 def _segments_from_script(text: str, duration: float | None) -> list[TranscriptSegment]:
@@ -112,8 +132,6 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
         for seg, vi in zip(segments, translated):
             seg.vietnamese = vi
     else:
-        # Pexels stock footage often has no audio. Generate a Vietnamese narration
-        # script from the discovered trend instead of treating missing audio as fatal.
         package = generate_package(trend)
         narration = str(package.get("translation") or trend).strip()
         info = probe(source)
