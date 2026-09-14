@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,8 +34,54 @@ class AutoResult:
     results: list[dict] = field(default_factory=list)
 
 
-def _progress(step: str, message: str) -> None:
-    print(f"[{step}] {message}", flush=True)
+class AutoUI:
+    """Professional, dependency-free terminal UI for AUTO runs."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.started = time.perf_counter()
+
+    @staticmethod
+    def line(char: str = "=", width: int = 76) -> None:
+        print(char * width, flush=True)
+
+    def header(self) -> None:
+        self.line("=")
+        print("  OPENPILOT STUDIO  |  AI CONTENT FACTORY", flush=True)
+        print("  AUTOMATIC DOUYIN -> VIETNAMESE -> 9:16 VIDEO", flush=True)
+        self.line("=")
+        print(f"  Batch size : {self.total:02d} videos", flush=True)
+        print(f"  AI         : {os.getenv('OPENPILOT_AI_PROVIDER', 'local')}", flush=True)
+        print(f"  TTS        : {os.getenv('OPENPILOT_TTS_PROVIDER', 'piper')}", flush=True)
+        print(f"  Publish    : {os.getenv('OPENPILOT_PUBLISH', 'none')}", flush=True)
+        self.line("-")
+
+    def phase(self, number: int, title: str, detail: str = "") -> None:
+        print(f"\n  [{number}/8] {title}", flush=True)
+        if detail:
+            print(f"        {detail}", flush=True)
+
+    def item(self, icon: str, message: str) -> None:
+        print(f"        {icon} {message}", flush=True)
+
+    def video_header(self, index: int, name: str) -> None:
+        print(f"\n  +---------------- VIDEO {index:02d}/{self.total:02d} ----------------+", flush=True)
+        print(f"  | {name[:60]}", flush=True)
+        print("  +--------------------------------------------------+", flush=True)
+
+    def video_stage(self, stage: int, name: str, started: float) -> None:
+        elapsed = time.perf_counter() - started
+        print(f"        [{stage}/5] {name:<34} {elapsed:6.1f}s", flush=True)
+
+    def finish(self, success: int, failed: int) -> None:
+        elapsed = time.perf_counter() - self.started
+        self.line("-")
+        print("  RUN SUMMARY", flush=True)
+        print(f"  Completed : {success:02d}/{self.total:02d}", flush=True)
+        print(f"  Failed    : {failed:02d}/{self.total:02d}", flush=True)
+        print(f"  Elapsed   : {elapsed:.1f}s", flush=True)
+        print(f"  Manifest  : output\\auto-manifest.json", flush=True)
+        self.line("=")
 
 
 def _http_detail(exc: urllib.error.HTTPError) -> str:
@@ -88,123 +135,11 @@ def discover_trend() -> str:
 def _has_audio(path: Path) -> bool:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     return result.returncode == 0 and bool(result.stdout.strip())
-
-
-def _download(url: str, target: Path, source_name: str) -> Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "OpenPilot-Studio/0.6"})
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as stream:
-            stream.write(response.read())
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"{source_name} media {exc.code}: {_http_detail(exc)}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"{source_name} media connection error: {exc.reason}") from exc
-    return target
-
-
-def _acquire_commons_videos(query: str, output_dir: Path, limit: int) -> list[tuple[Path, str]]:
-    terms = [query, "nature landscape", "city street", "people culture"]
-    found: list[tuple[Path, str]] = []
-    seen_urls: set[str] = set()
-    for term in terms:
-        params = urllib.parse.urlencode({
-            "action": "query", "generator": "search", "gsrsearch": f"{term} filetype:video",
-            "gsrnamespace": "6", "gsrlimit": "30", "prop": "imageinfo", "iiprop": "url|mime", "format": "json",
-        })
-        try:
-            data = _get_json(
-                f"https://commons.wikimedia.org/w/api.php?{params}",
-                headers={"User-Agent": "OpenPilot-Studio/0.6 (local automation)"},
-                api_name="Wikimedia Commons API",
-            )
-        except RuntimeError:
-            continue
-        for page in data.get("query", {}).get("pages", {}).values():
-            info = (page.get("imageinfo") or [{}])[0]
-            url = info.get("url")
-            mime = str(info.get("mime", "")).lower()
-            if not url or url in seen_urls or not (mime.startswith("video/") or url.lower().split("?")[0].endswith((".mp4", ".webm", ".ogv"))):
-                continue
-            suffix = ".mp4" if "mp4" in mime or url.lower().split("?")[0].endswith(".mp4") else ".webm"
-            target = output_dir / f"commons-{page.get('pageid', len(found) + 1)}{suffix}"
-            try:
-                item = (_download(url, target, "Wikimedia Commons"), url)
-            except RuntimeError:
-                continue
-            seen_urls.add(url)
-            found.append(item)
-            if len(found) >= limit:
-                return found
-    return found
-
-
-def _acquire_pexels_videos(query: str, output_dir: Path, limit: int) -> list[tuple[Path, str]]:
-    key = os.getenv("PEXELS_API_KEY")
-    if not key:
-        return []
-    params = urllib.parse.urlencode({"query": query, "per_page": str(max(limit, 10)), "orientation": "portrait"})
-    data = _get_json(
-        f"https://api.pexels.com/videos/search?{params}",
-        headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.6"},
-        api_name="Pexels API",
-    )
-    found: list[tuple[Path, str]] = []
-    for item in data.get("videos", []):
-        files = sorted(item.get("video_files", []), key=lambda x: (x.get("width", 0), x.get("height", 0)), reverse=True)
-        for file_info in files:
-            link = file_info.get("link")
-            if not link or file_info.get("width", 0) < 720:
-                continue
-            target = output_dir / f"pexels-{item.get('id', len(found) + 1)}.mp4"
-            try:
-                found.append((_download(link, target, "Pexels"), link))
-                break
-            except RuntimeError:
-                continue
-        if len(found) >= limit:
-            break
-    return found
-
-
-def acquire_videos(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
-    """Acquire a batch, preferring public Douyin and filling shortages with fallback media."""
-    source = os.getenv("OPENPILOT_SOURCE", "auto").lower()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    videos: list[tuple[Path, str]] = []
-
-    if source in {"douyin", "auto"}:
-        try:
-            videos = acquire_douyin_batch(query, output_dir / "douyin", limit=limit)
-        except RuntimeError as exc:
-            if source == "douyin":
-                raise
-            print(f"[4/8] Douyin không tải đủ: {exc}", flush=True)
-
-    if source in {"auto", "pexels", "fallback"} and len(videos) < limit:
-        need = limit - len(videos)
-        if os.getenv("PEXELS_API_KEY"):
-            try:
-                extra = _acquire_pexels_videos(query, output_dir / "pexels", need)
-                videos.extend(extra)
-            except RuntimeError as exc:
-                print(f"[4/8] Pexels không dùng được: {exc}", flush=True)
-
-    if source in {"auto", "commons", "fallback"} and len(videos) < limit:
-        need = limit - len(videos)
-        print(f"[4/8] Đang bổ sung {need} video từ Wikimedia Commons...", flush=True)
-        videos.extend(_acquire_commons_videos(query, output_dir / "commons", need))
-
-    if not videos:
-        raise RuntimeError("Không tìm được video nào để xử lý.")
-    return videos[:limit]
-
-
-def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
-    return acquire_videos(query, output_dir, limit=1)[0]
 
 
 def _segments_from_script(text: str, duration: float | None) -> list[TranscriptSegment]:
@@ -221,16 +156,23 @@ def _segments_from_script(text: str, duration: float | None) -> list[TranscriptS
 
 def _mux_voice(video: Path, voice: Path, output: Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([
-        "ffmpeg", "-y", "-i", str(video), "-i", str(voice), "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy", "-c:a", "aac", "-shortest", str(output)
-    ], check=True, capture_output=True, text=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(video), "-i", str(voice),
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-shortest", str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     return output
 
 
-def _process_one(index: int, total: int, trend: str, source: Path, source_url: str, out: Path, whisper_model: str, publish_mode: str) -> dict:
-    print(f"\n===== VIDEO {index}/{total}: {source.name} =====", flush=True)
+def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: str, out: Path, whisper_model: str, publish_mode: str) -> dict:
+    ui.video_header(index, source.name)
+    started = time.perf_counter()
     try:
+        stage_started = time.perf_counter()
         has_audio = _has_audio(source)
         if has_audio:
             segments = transcribe(source, whisper_model)
@@ -245,17 +187,28 @@ def _process_one(index: int, total: int, trend: str, source: Path, source_url: s
             segments = _segments_from_script(narration, probe(source).duration)
             for seg in segments:
                 seg.vietnamese = seg.text
+        ui.video_stage(1, "Whisper + AI translation", stage_started)
 
         stem = f"video-{index:02d}-{source.stem}"
+        stage_started = time.perf_counter()
         subtitle = write_srt(segments, out / f"{stem}.vi.srt")
+        ui.video_stage(2, "Vietnamese subtitles (SRT)", stage_started)
+
         title = str(package.get("title") or trend).strip()
         hashtags = package.get("hashtags", [])
         hashtag_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
         narration_text = " ".join(getattr(s, "vietnamese", s.text) for s in segments).strip() or str(package.get("translation") or trend).strip()
+
+        stage_started = time.perf_counter()
         voice = synthesize_speech(narration_text, out / f"{stem}.vi.mp3")
+        ui.video_stage(3, "Vietnamese voice / TTS", stage_started)
+
+        stage_started = time.perf_counter()
         vertical = make_vertical(source, out / f"{stem}.vertical.mp4")
         voiced = _mux_voice(Path(vertical), voice, out / f"{stem}.final.mp4")
+        ui.video_stage(4, "FFmpeg render 9:16 + audio", stage_started)
 
+        stage_started = time.perf_counter()
         published = "not_requested"
         status = "ready_for_publish"
         if publish_mode == "tiktok":
@@ -264,53 +217,104 @@ def _process_one(index: int, total: int, trend: str, source: Path, source_url: s
         elif publish_mode == "youtube":
             published = publish_youtube(str(voiced), title, f"{package.get('description', '')}\n\n{hashtag_text}")
             status = "published"
+        ui.video_stage(5, "Official publishing", stage_started)
 
+        total_time = time.perf_counter() - started
+        ui.item("OK", f"Hoan tat trong {total_time:.1f}s")
+        ui.item("->", f"Video : {voiced}")
+        ui.item("->", f"Title : {title}")
+        ui.item("->", f"Tags  : {hashtag_text}")
         return {
-            "index": index, "source_url": source_url, "input_video": str(source), "subtitle_file": str(subtitle),
-            "output_video": str(voiced), "title": title, "hashtags": hashtag_text,
-            "status": status, "published": published, "error": "",
+            "index": index,
+            "source": "douyin",
+            "source_url": source_url,
+            "input_video": str(source),
+            "subtitle_file": str(subtitle),
+            "output_video": str(voiced),
+            "title": title,
+            "hashtags": hashtag_text,
+            "status": status,
+            "published": published,
+            "error": "",
+            "elapsed_seconds": round(total_time, 2),
         }
     except Exception as exc:
-        print(f"[VIDEO {index}/{total}] LỖI: {exc}", flush=True)
+        total_time = time.perf_counter() - started
+        ui.item("ERR", f"Loi sau {total_time:.1f}s: {exc}")
         return {
-            "index": index, "source_url": source_url, "input_video": str(source), "subtitle_file": "", "output_video": "",
-            "title": "", "hashtags": "", "status": "failed", "published": "not_requested", "error": str(exc),
+            "index": index,
+            "source": "douyin",
+            "source_url": source_url,
+            "input_video": str(source),
+            "subtitle_file": "",
+            "output_video": "",
+            "title": "",
+            "hashtags": "",
+            "status": "failed",
+            "published": "not_requested",
+            "error": str(exc),
+            "elapsed_seconds": round(total_time, 2),
         }
 
 
 def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoResult:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    target_count = max(1, int(os.getenv("OPENPILOT_BATCH_SIZE", "10")))
+    target_count = max(1, min(50, int(os.getenv("OPENPILOT_BATCH_SIZE", "10"))))
+    ui = AutoUI(target_count)
+    ui.header()
 
-    _progress("1/8", "Đang tìm trend...")
+    ui.phase(1, "TREND DISCOVERY", "Finding a current topic for the Douyin search")
     trend = discover_trend()
-    _progress("2/8", f"Đang tìm {target_count} video...")
-    videos = acquire_videos(trend, out / "source", limit=target_count)
-    print(f"[5/8] Đã có {len(videos)}/{target_count} video để xử lý", flush=True)
+    ui.item("OK", f"Trend: {trend}")
+
+    ui.phase(2, "DOUYIN ACQUISITION", f"Searching and downloading {target_count} Douyin videos")
+    videos = acquire_douyin_batch(trend, out / "source" / "douyin", limit=target_count)
+    ui.item("OK", f"Downloaded {len(videos)}/{target_count} Douyin videos")
+    if len(videos) < target_count:
+        ui.item("WARN", f"Only {len(videos)} accessible Douyin videos were found; no fallback source is used.")
 
     publish_mode = os.getenv("OPENPILOT_PUBLISH", "none").lower()
     if publish_mode not in {"none", "tiktok", "youtube"}:
         raise RuntimeError("OPENPILOT_PUBLISH must be none, tiktok, or youtube.")
 
+    ui.phase(3, "CONTENT PROCESSING", "Each downloaded video is processed independently")
     results: list[dict] = []
     for index, (source, source_url) in enumerate(videos, 1):
-        _progress("6/8", f"Xử lý video {index}/{len(videos)}: Whisper/AI/TTS/9:16")
-        result = _process_one(index, len(videos), trend, source, source_url, out, whisper_model, publish_mode)
+        result = _process_one(ui, index, trend, source, source_url, out, whisper_model, publish_mode)
         results.append(result)
 
     success_count = sum(item["status"] in {"ready_for_publish", "published"} for item in results)
     failed_count = len(results) - success_count
     manifest = {
-        "trend": trend, "requested": target_count, "acquired": len(videos),
-        "completed": success_count, "failed": failed_count, "publish_mode": publish_mode, "results": results,
+        "trend": trend,
+        "source_policy": "douyin_only",
+        "requested": target_count,
+        "acquired": len(videos),
+        "completed": success_count,
+        "failed": failed_count,
+        "publish_mode": publish_mode,
+        "results": results,
     }
-    (out / "auto-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_path = out / "auto-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    first = next((r for r in results if r["status"] != "failed"), results[0])
+    ui.phase(8, "FINAL REPORT", "Batch processing finished")
+    ui.finish(success_count, failed_count)
+
+    first = next((r for r in results if r["status"] != "failed"), results[0] if results else {})
     status = "published" if publish_mode != "none" and success_count else ("ready_for_publish" if success_count else "failed")
-    print(f"[8/8] Hoàn tất batch: {success_count}/{len(results)} video thành công; {failed_count} lỗi.", flush=True)
+    message = f"Completed {success_count}/{len(videos)} Douyin videos. Manifest: {manifest_path}"
     return AutoResult(
-        trend, first["source_url"], first["input_video"], first["subtitle_file"], first["output_video"], status,
-        first["title"], first["hashtags"], f"Batch completed: {success_count}/{len(results)} videos succeeded.", first["published"], results,
+        trend=trend,
+        source_url=first.get("source_url", ""),
+        input_video=first.get("input_video", ""),
+        subtitle_file=first.get("subtitle_file", ""),
+        output_video=first.get("output_video", ""),
+        status=status,
+        title=first.get("title", ""),
+        hashtags=first.get("hashtags", ""),
+        message=message,
+        published=first.get("published", "not_requested"),
+        results=results,
     )
