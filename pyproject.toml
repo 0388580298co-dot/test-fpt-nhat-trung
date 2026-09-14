@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openpilot-agent"
-version = "0.1.0"
-description = "A safe, local-first AI coding agent starter"
+version = "0.2.0"
+description = "A safe local-first AI coding agent"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
