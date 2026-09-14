@@ -95,13 +95,39 @@ def _translate_batch(texts: list[str], model: str | None = None) -> list[str]:
 def translate_segments(texts: list[str], model: str | None = None) -> list[str]:
     if not texts:
         return []
-    # Small batches prevent a long Whisper transcript from overflowing the
-    # context window of compact local models such as Qwen 2.5 3B.
     batch_size = max(2, min(8, int(os.getenv("OPENPILOT_TRANSLATION_BATCH", "6"))))
     output: list[str] = []
     for start in range(0, len(texts), batch_size):
         output.extend(_translate_batch(texts[start:start + batch_size], model))
     return output
+
+
+def generate_narration(source_text: str, duration_seconds: float, model: str | None = None) -> str:
+    """Create a polished Vietnamese voice-over that intentionally covers the full video."""
+    source_text = " ".join(source_text.split()).strip()
+    duration = max(5.0, float(duration_seconds or 5.0))
+    if not source_text:
+        raise RuntimeError("Cannot create narration from empty source text.")
+
+    # Vietnamese narration at a calm social-video pace is roughly 2.1-2.4 words/sec.
+    target_words = max(18, int(duration * 2.25))
+    prompt = (
+        "You are a senior Vietnamese short-form video narrator and editor. Rewrite the SOURCE into ONE "
+        "continuous, modern, professional Vietnamese voice-over for the ENTIRE video. This is narration, "
+        "not a literal translation and not a summary. Preserve every important factual detail present in "
+        "the source, but remove ASR noise, repetition and filler. Do not invent names, numbers, places, "
+        "events, opinions or facts. Use a natural Vietnamese spoken style: confident, concise, contemporary, "
+        "engaging, with smooth transitions and short sentences. No headings, bullets, emojis, hashtags, "
+        "stage directions or quotation marks. Start with a strong but factual opening, explain what viewers "
+        "are seeing, and finish with a natural closing sentence. The narration must be long enough to cover "
+        f"the FULL {duration:.1f}-second video at about 2.25 Vietnamese words/second: target about {target_words} words. "
+        "Return JSON exactly {\"narration\":\"...\"}.\nSOURCE:\n" + source_text
+    )
+    result = _chat_json(prompt, model)
+    narration = " ".join(str(result.get("narration") or "").split()).strip()
+    if not narration:
+        raise RuntimeError("AI narration returned empty text.")
+    return narration
 
 
 def _normalize_hashtags(value: object) -> list[str]:
