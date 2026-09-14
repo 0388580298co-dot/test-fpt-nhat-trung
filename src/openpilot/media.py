@@ -23,7 +23,7 @@ class MediaInfo:
 
 def require_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        raise MediaError("FFmpeg + ffprobe are required. Install FFmpeg and add it to PATH.")
+        raise MediaError("FFmpeg + ffprobe are required. Install FFmpeg and add them to PATH.")
 
 
 def _run(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
@@ -38,11 +38,7 @@ def probe(path: str | Path) -> MediaInfo:
     p = Path(path)
     if not p.exists() or p.stat().st_size < 100_000:
         raise MediaError(f"Media file is missing or too small: {p}")
-    result = _run([
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration:stream=index,width,height,codec_name,codec_type,profile,pix_fmt,level",
-        "-of", "json", str(p),
-    ], 30)
+    result = _run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=index,width,height,codec_name,codec_type,profile,pix_fmt,level", "-of", "json", str(p)], 30)
     if result.returncode != 0:
         raise MediaError(result.stderr.strip() or f"Unable to inspect media: {p}")
     try:
@@ -53,11 +49,7 @@ def probe(path: str | Path) -> MediaInfo:
     video = next((s for s in streams if s.get("codec_type") == "video"), {})
     audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
     duration = data.get("format", {}).get("duration")
-    return MediaInfo(
-        float(duration) if duration not in (None, "") else None,
-        video.get("width"), video.get("height"),
-        video.get("codec_name"), audio.get("codec_name"), video.get("pix_fmt"),
-    )
+    return MediaInfo(float(duration) if duration not in (None, "") else None, video.get("width"), video.get("height"), video.get("codec_name"), audio.get("codec_name"), video.get("pix_fmt"))
 
 
 def validate_video(path: str | Path, *, min_seconds: float = 0.0, require_audio: bool = False) -> MediaInfo:
@@ -78,84 +70,53 @@ def _atomic_replace(temp: Path, output: Path) -> None:
 
 
 def _subtitle_filter(srt: Path) -> str:
-    # FFmpeg/libass accepts forward-slash paths; escape the colon used by C:\.
-    value = str(srt.resolve()).replace("\\", "/")
-    value = value.replace(":", r"\:").replace("'", r"\'")
+    value = str(srt.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
     return f"subtitles='{value}':force_style='FontName=Arial,FontSize=18,Outline=2,Shadow=1,MarginV=120,Alignment=2'"
 
 
-def render_final(
-    input_path: str | Path,
-    subtitle_path: str | Path,
-    voice_path: str | Path,
-    output_path: str | Path,
-) -> Path:
-    """Render the final social-ready 9:16 H.264/AAC MP4 with burned-in Vietnamese subtitles."""
+def render_final(input_path: str | Path, subtitle_path: str | Path, voice_path: str | Path, output_path: str | Path) -> Path:
+    """Render a validated 1080x1920 H.264/AAC MP4 with burned-in Vietnamese subtitles."""
     require_ffmpeg()
-    source = Path(input_path)
-    srt = Path(subtitle_path)
-    voice = Path(voice_path)
-    output = Path(output_path)
-    if not source.exists():
-        raise MediaError(f"Source video not found: {source}")
-    if not srt.exists():
-        raise MediaError(f"Subtitle file not found: {srt}")
-    if not voice.exists() or voice.stat().st_size < 1024:
-        raise MediaError(f"Voice file not found or empty: {voice}")
-    validate_video(source, min_seconds=10.0)
+    source, srt, voice, output = Path(input_path), Path(subtitle_path), Path(voice_path), Path(output_path)
+    if not source.exists(): raise MediaError(f"Source video not found: {source}")
+    if not srt.exists(): raise MediaError(f"Subtitle file not found: {srt}")
+    if not voice.exists() or voice.stat().st_size < 1024: raise MediaError(f"Voice file not found or empty: {voice}")
+    source_info = validate_video(source)
+    if not source_info.duration: raise MediaError("Source duration is unavailable")
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".rendering.mp4")
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1," + _subtitle_filter(srt)
     cmd = [
         "ffmpeg", "-y", "-i", str(source), "-i", str(voice),
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-        "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        "-shortest", "-movflags", "+faststart", str(temp),
+        "-map", "0:v:0", "-map", "1:a:0", "-vf", vf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-af", "apad", "-t", f"{source_info.duration:.3f}",
+        "-movflags", "+faststart", str(temp),
     ]
     try:
         result = _run(cmd, 300)
-        if result.returncode != 0:
-            raise MediaError(result.stderr.strip()[-3000:] or "FFmpeg final render failed")
+        if result.returncode != 0: raise MediaError(result.stderr.strip()[-3000:] or "FFmpeg final render failed")
         info = probe(temp)
-        if not info.duration or info.width != 1080 or info.height != 1920 or info.video_codec != "h264" or info.audio_codec != "aac" or info.pixel_format != "yuv420p":
-            raise MediaError(
-                f"Final media validation failed: {info.width}x{info.height}, "
-                f"video={info.video_codec}, audio={info.audio_codec}, pix_fmt={info.pixel_format}, duration={info.duration}"
-            )
+        if info.width != 1080 or info.height != 1920 or info.video_codec != "h264" or info.audio_codec != "aac" or info.pixel_format != "yuv420p":
+            raise MediaError(f"Final validation failed: {info.width}x{info.height}, video={info.video_codec}, audio={info.audio_codec}, pix_fmt={info.pixel_format}")
         _atomic_replace(temp, output)
     finally:
-        try:
-            temp.unlink()
-        except FileNotFoundError:
-            pass
+        temp.unlink(missing_ok=True)
     return output
 
 
 def make_vertical(input_path: str | Path, output_path: str | Path) -> Path:
     """Backward-compatible video-only 9:16 renderer."""
     require_ffmpeg()
-    source = Path(input_path)
-    out = Path(output_path)
+    source, out = Path(input_path), Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     temp = out.with_suffix(out.suffix + ".rendering.mp4")
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
-    cmd = [
-        "ffmpeg", "-y", "-i", str(source), "-map", "0:v:0", "-vf", vf,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-        "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(temp),
-    ]
+    cmd = ["ffmpeg", "-y", "-i", str(source), "-map", "0:v:0", "-vf", vf, "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(temp)]
     try:
         result = _run(cmd, 300)
-        if result.returncode != 0:
-            raise MediaError(result.stderr.strip()[-3000:] or "FFmpeg render failed")
-        validate_video(temp)
-        _atomic_replace(temp, out)
+        if result.returncode != 0: raise MediaError(result.stderr.strip()[-3000:] or "FFmpeg render failed")
+        validate_video(temp); _atomic_replace(temp, out)
     finally:
-        try:
-            temp.unlink()
-        except FileNotFoundError:
-            pass
+        temp.unlink(missing_ok=True)
     return out
