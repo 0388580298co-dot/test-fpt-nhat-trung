@@ -10,7 +10,6 @@ from pathlib import Path
 
 
 def _provider() -> str:
-    # Local AI is the reliable default for the fully local pipeline.
     return os.getenv("OPENPILOT_AI_PROVIDER", "local").strip().lower()
 
 
@@ -25,7 +24,7 @@ def _ollama_json(prompt: str) -> dict:
         "prompt": prompt,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.2},
+        "options": {"temperature": 0.15},
     }
     req = urllib.request.Request(
         os.getenv("OPENPILOT_OLLAMA_URL", "http://127.0.0.1:11434/api/generate"),
@@ -37,19 +36,13 @@ def _ollama_json(prompt: str) -> dict:
         with urllib.request.urlopen(req, timeout=180) as response:
             data = json.loads(response.read().decode("utf-8"))
     except socket.timeout as exc:
-        raise RuntimeError(
-            f"Local AI timed out after 180 seconds while using '{_local_model()}'. "
-            "Make sure Ollama is running and the model is available; a smaller model such as qwen2.5:3b is recommended."
-        ) from exc
+        raise RuntimeError(f"Local AI timed out after 180 seconds using '{_local_model()}'.") from exc
     except TimeoutError as exc:
-        raise RuntimeError(
-            f"Local AI timed out after 180 seconds while using '{_local_model()}'. "
-            "Make sure Ollama is running and the model is available."
-        ) from exc
+        raise RuntimeError(f"Local AI timed out after 180 seconds using '{_local_model()}'.") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
-            "Local AI is unavailable. Start Ollama and install the model "
-            f"'{_local_model()}', then run openpilot auto again. Details: {exc.reason}"
+            "Local AI is unavailable. Start Ollama and install "
+            f"'{_local_model()}'. Details: {exc.reason}"
         ) from exc
     text = data.get("response", "").strip()
     if not text:
@@ -79,9 +72,7 @@ def _openai_request(path: str, payload: dict) -> dict:
     except TimeoutError as exc:
         raise RuntimeError(f"OpenAI API timed out while calling {path}.") from exc
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        if len(detail) > 600:
-            detail = detail[:600]
+        detail = exc.read().decode("utf-8", errors="replace").strip()[:600]
         raise RuntimeError(f"OpenAI API {exc.code} ({path}): {detail or exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"OpenAI API connection error ({path}): {exc.reason}") from exc
@@ -102,8 +93,9 @@ def translate_segments(texts: list[str], model: str | None = None) -> list[str]:
     if not texts:
         return []
     result = _chat_json(
-        "Translate every item into natural Vietnamese. Preserve meaning and return JSON as "
-        "{\"items\":[strings]}. Items:\n" + json.dumps(texts, ensure_ascii=False), model
+        "Translate every item into natural, fluent Vietnamese for subtitles. "
+        "Preserve names, numbers and factual meaning. Do not add information. "
+        "Return JSON exactly as {\"items\":[strings]}. Items:\n" + json.dumps(texts, ensure_ascii=False), model
     )
     items = result.get("items", [])
     if len(items) != len(texts):
@@ -111,35 +103,67 @@ def translate_segments(texts: list[str], model: str | None = None) -> list[str]:
     return [str(x).strip() for x in items]
 
 
+def _normalize_hashtags(value: object) -> list[str]:
+    raw = value if isinstance(value, list) else str(value or "").replace(",", " ").split()
+    result: list[str] = []
+    for item in raw:
+        tag = "".join(str(item).strip().split())
+        if not tag:
+            continue
+        if not tag.startswith("#"):
+            tag = "#" + tag
+        if len(tag) > 40 or tag.lower() in {x.lower() for x in result}:
+            continue
+        result.append(tag)
+        if len(result) >= 8:
+            break
+    return result
+
+
+def _clean_title(value: object, fallback: str) -> str:
+    title = " ".join(str(value or "").replace("\n", " ").split()).strip(" \"'“”")
+    if not title:
+        title = " ".join(fallback.split())
+    return title[:90].rstrip(" .,!?;:")
+
+
 def generate_package(source_text: str, model: str | None = None) -> dict:
-    return _chat_json(
-        "Return JSON only with keys translation, title, description, hashtags. "
-        "Translate the supplied text naturally into Vietnamese. Create a short, "
-        "non-clickbait Vietnamese title, description and 5-10 relevant hashtags. "
-        "Do not invent factual claims. Text:\n" + source_text,
-        model,
+    """Generate a factual Vietnamese publishing package with normalized metadata."""
+    prompt = (
+        "You are a careful Vietnamese short-video editor. Return JSON only with keys "
+        "translation, title, description, hashtags.\n"
+        "RULES:\n"
+        "- translation must be natural Vietnamese and faithful to the supplied text.\n"
+        "- title must be a natural Vietnamese title, 8-70 characters, not clickbait.\n"
+        "- Never copy transcript fragments that look like ASR errors or random English words.\n"
+        "- Keep real proper names only when clearly present in the source.\n"
+        "- description must be concise Vietnamese and must not invent facts.\n"
+        "- hashtags must contain 5-8 UNIQUE relevant Vietnamese hashtags. No duplicates.\n"
+        "- Do not claim the source says something it does not say.\n"
+        "SOURCE:\n" + source_text
     )
+    result = _chat_json(prompt, model)
+    title = _clean_title(result.get("title"), source_text[:70])
+    description = " ".join(str(result.get("description") or result.get("translation") or "").split())[:500]
+    hashtags = _normalize_hashtags(result.get("hashtags"))
+    if len(hashtags) < 5:
+        for tag in ["#TinTuc", "#VideoNgan", "#VietNam", "#NoiDungHay", "#XuHuong"]:
+            if tag.lower() not in {x.lower() for x in hashtags}:
+                hashtags.append(tag)
+            if len(hashtags) >= 5:
+                break
+    return {"translation": str(result.get("translation") or "").strip(), "title": title, "description": description, "hashtags": hashtags}
 
 
 def _piper_speech(text: str, output_file: str | Path) -> Path:
     model = os.getenv("PIPER_MODEL")
     if not model:
-        raise RuntimeError(
-            "Local TTS needs PIPER_MODEL pointing to a Vietnamese Piper .onnx model. "
-            "Set OPENPILOT_TTS_PROVIDER=pyttsx3 for Windows system speech instead."
-        )
+        raise RuntimeError("Local TTS needs PIPER_MODEL. Set OPENPILOT_TTS_PROVIDER=pyttsx3 for Windows system speech.")
     piper = os.getenv("PIPER_COMMAND", "piper")
     target = Path(output_file)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(
-            [piper, "--model", model, "--output_file", str(target)],
-            input=text,
-            text=True,
-            check=True,
-            capture_output=True,
-            timeout=300,
-        )
+        subprocess.run([piper, "--model", model, "--output_file", str(target)], input=text, text=True, check=True, capture_output=True, timeout=300)
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Local Piper TTS failed: {exc}") from exc
     return target
@@ -189,9 +213,7 @@ def synthesize_speech(text: str, output_file: str | Path) -> Path:
     except TimeoutError as exc:
         raise RuntimeError("OpenAI TTS timed out while generating the voice.") from exc
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        if len(detail) > 600:
-            detail = detail[:600]
+        detail = exc.read().decode("utf-8", errors="replace").strip()[:600]
         raise RuntimeError(f"OpenAI API {exc.code} (/audio/speech): {detail or exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"OpenAI API connection error (/audio/speech): {exc.reason}") from exc
