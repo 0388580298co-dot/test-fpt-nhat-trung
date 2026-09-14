@@ -38,14 +38,13 @@ def _fetch(url: str) -> str:
 
 
 def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
-    variants = [query, " ".join(query.split()[:6]), "热门 视频"]
+    variants = [query, " ".join(query.split()[:8]), "热门 视频", "抖音 热门"]
     found: list[str] = []
     for term in variants:
+        search = f"site:douyin.com/video {term}"
         if engine == "bing":
-            search = f"site:douyin.com/video {term}"
             url = f"https://www.bing.com/search?q={quote_plus(search)}&count=50"
         else:
-            search = f"site:douyin.com/video {term}"
             url = f"https://html.duckduckgo.com/html/?q={quote_plus(search)}"
         try:
             for item in _extract_urls(_fetch(url), limit):
@@ -67,17 +66,20 @@ def _search_direct_douyin(query: str, limit: int) -> list[str]:
 
 
 def _search_urls(query: str, limit: int = 10) -> list[str]:
+    # Search substantially more candidates than the requested output count so
+    # inaccessible/removed videos do not prevent a 10-video batch.
+    candidate_limit = max(limit * 5, 30)
     found: list[str] = []
-    for url in _search_direct_douyin(query, limit):
+    for url in _search_direct_douyin(query, candidate_limit):
         if url not in found:
             found.append(url)
     for engine in ("bing", "duckduckgo"):
-        for url in _search_engine_urls(query, engine, limit):
+        for url in _search_engine_urls(query, engine, candidate_limit):
             if url not in found:
                 found.append(url)
-            if len(found) >= limit:
-                return found[:limit]
-    return found[:limit]
+            if len(found) >= candidate_limit:
+                return found[:candidate_limit]
+    return found[:candidate_limit]
 
 
 def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, str]:
@@ -108,12 +110,12 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
 
 
 def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
-    """Find up to ``limit`` public candidates and download every accessible one.
+    """Find and download up to ``limit`` accessible public Douyin videos.
 
-    If OPENPILOT_DOUYIN_COOKIES points to a cookie file explicitly supplied by the
-    user/account owner, yt-dlp may use it. This does not solve CAPTCHA challenges,
-    bypass anti-bot controls, remove DRM, or obtain credentials automatically.
-    Inaccessible candidates are skipped so one blocked video does not stop AUTO.
+    The search gathers extra candidates so failed/removed URLs can be skipped.
+    A user-owned cookie file can be supplied through OPENPILOT_DOUYIN_COOKIES.
+    This uses ordinary yt-dlp access only: no CAPTCHA, DRM, credential theft,
+    watermark removal, or anti-bot bypass is performed.
     """
     urls = _search_urls(query, limit=limit)
     if not urls:
@@ -121,16 +123,19 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
 
     successes: list[tuple[Path, str]] = []
     errors: list[str] = []
-    print(f"[3/8] Tìm thấy {len(urls)} video Douyin để thử tải", flush=True)
+    print(f"[3/8] Tìm thấy {len(urls)} ứng viên Douyin để thử tải", flush=True)
     for index, url in enumerate(urls, 1):
-        print(f"[4/8] Đang thử tải video {index}/{len(urls)}...", flush=True)
+        if len(successes) >= limit:
+            break
+        print(f"[4/8] Đang thử tải ứng viên {index}/{len(urls)}...", flush=True)
         try:
-            item = _download_public_url(url, output_dir, index)
+            item = _download_public_url(url, output_dir, len(successes) + 1)
             successes.append(item)
-            print(f"       OK video {index}/{len(urls)}", flush=True)
+            print(f"       OK: đã tải được {len(successes)}/{limit} video", flush=True)
         except Exception as exc:
             errors.append(str(exc))
-            print(f"       Bỏ qua video {index}/{len(urls)}: {exc}", flush=True)
+            print(f"       Bỏ qua: {exc}", flush=True)
+
     if not successes:
         detail = errors[-1] if errors else "all discovered URLs were inaccessible"
         raise RuntimeError(f"No accessible public Douyin video found for '{query}'. {detail}")
