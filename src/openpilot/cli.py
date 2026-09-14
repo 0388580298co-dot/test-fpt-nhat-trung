@@ -2,12 +2,13 @@ import argparse
 import json
 from .agent import as_json, run
 from .github_tool import inspect_repository
+from .pipeline import process_video
 from .providers import provider_from_env
 from .test_runner import run_pytest
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenPilot v0.2 - safe local-first coding agent")
+    parser = argparse.ArgumentParser(description="OpenPilot Studio - AI Content Factory")
     sub = parser.add_subparsers(dest="command", required=True)
 
     plan = sub.add_parser("plan", help="Create a safe plan for a task")
@@ -22,6 +23,12 @@ def main():
     test = sub.add_parser("test", help="Run the safe pytest runner")
     test.add_argument("--workspace", default=".")
 
+    video = sub.add_parser("video", help="Process an authorized video with Whisper + SRT + 9:16 FFmpeg render")
+    video.add_argument("input_video", help="Path to the source video")
+    video.add_argument("--output-dir", default="output", help="Output directory")
+    video.add_argument("--whisper-model", default="small", help="faster-whisper model, e.g. tiny, base, small")
+    video.add_argument("--json", action="store_true", help="Print the result as JSON")
+
     args = parser.parse_args()
 
     if args.command == "plan":
@@ -30,7 +37,7 @@ def main():
         if args.json:
             print(json.dumps(as_json(report), indent=2, ensure_ascii=False))
             return
-        print("OpenPilot v0.2\n")
+        print("OpenPilot Studio\n")
         for i, step in enumerate(report.plan, 1):
             print(f"{i}. {step}")
         print(f"\nProvider: {report.provider}")
@@ -50,6 +57,26 @@ def main():
             print(result.stderr, end="")
         print(f"\nExit code: {result.returncode}")
         raise SystemExit(result.returncode)
+
+    elif args.command == "video":
+        try:
+            result = process_video(args.input_video, args.output_dir, args.whisper_model)
+        except Exception as exc:
+            parser.error(str(exc))
+        payload = {
+            "input_video": result.input_video,
+            "subtitle_file": result.subtitle_file,
+            "output_video": result.output_video,
+            "segments": result.segments,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("OpenPilot Studio - Video Pipeline\n")
+            print(f"Input:    {result.input_video}")
+            print(f"Subtitle: {result.subtitle_file}")
+            print(f"Video:    {result.output_video}")
+            print(f"Segments: {result.segments}")
 
 
 if __name__ == "__main__":
