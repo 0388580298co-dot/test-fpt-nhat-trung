@@ -11,9 +11,9 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .ai_content import generate_package, synthesize_speech, translate_segments
+from .ai_content import generate_narration, generate_package, synthesize_speech, translate_segments
 from .douyin_acquisition import acquire_douyin_batch
-from .media import probe, render_final, validate_video
+from .media import validate_video, render_final
 from .official_publishers import publish_tiktok, publish_youtube
 from .subtitles import write_srt
 from .transcription import TranscriptSegment, transcribe
@@ -46,7 +46,7 @@ class AutoUI:
     def header(self) -> None:
         self.line()
         print("  OPENPILOT STUDIO  |  AI CONTENT FACTORY", flush=True)
-        print("  DOUYIN -> WHISPER -> VIETNAMESE -> TTS -> 9:16 -> PUBLISH", flush=True)
+        print("  DOUYIN -> WHISPER -> VIETNAMESE -> NARRATION -> TTS -> 9:16 -> PUBLISH", flush=True)
         self.line()
         print(f"  Batch        : {self.total:02d} videos", flush=True)
         print("  Source       : Douyin only | duration >10s", flush=True)
@@ -147,17 +147,51 @@ def _translate_transcript(segments: list[TranscriptSegment]) -> list[TranscriptS
     return clean
 
 
-def _segments_from_script(text: str, duration: float | None) -> list[TranscriptSegment]:
+def _split_narration(text: str) -> list[str]:
     clean = " ".join(text.split())
     if not clean:
         return []
+    parts = []
+    current = ""
+    for token in clean.replace("!", ".").replace("?", ".").replace(";", ".").split("."):
+        token = token.strip()
+        if token:
+            current = f"{current} {token}".strip()
+            # Keep subtitle chunks comfortably readable.
+            if len(current) >= 55:
+                parts.append(current)
+                current = ""
+    if current:
+        parts.append(current)
+    return parts or [clean]
+
+
+def _segments_from_script(text: str, duration: float | None) -> list[TranscriptSegment]:
+    sentences = _split_narration(text)
+    if not sentences:
+        return []
     total = max(float(duration or 5.0), 5.0)
-    sentences = [x.strip() for x in clean.replace("!", ".").replace("?", ".").split(".") if x.strip()] or [clean]
-    step = total / len(sentences)
-    result = [TranscriptSegment(i * step, min(total, (i + 1) * step), sentence) for i, sentence in enumerate(sentences)]
-    for segment in result:
-        segment.vietnamese = segment.text
+    weights = [max(1, len(x)) for x in sentences]
+    weight_total = sum(weights)
+    cursor = 0.0
+    result: list[TranscriptSegment] = []
+    for index, sentence in enumerate(sentences):
+        span = total * weights[index] / weight_total
+        end = total if index == len(sentences) - 1 else min(total, cursor + span)
+        segment = TranscriptSegment(cursor, end, sentence)
+        segment.vietnamese = sentence
+        result.append(segment)
+        cursor = end
     return result
+
+
+def _build_narration(segments: list[TranscriptSegment], trend: str, duration: float) -> tuple[str, list[TranscriptSegment]]:
+    source = " ".join(s.vietnamese or s.text for s in segments).strip() or trend
+    narration = generate_narration(source, duration)
+    timed = _segments_from_script(narration, duration)
+    if not timed:
+        raise RuntimeError("AI narration produced no usable speech.")
+    return narration, timed
 
 
 def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: str, out: Path, whisper_model: str, publish_mode: str) -> dict:
@@ -169,31 +203,31 @@ def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: s
 
         stage_started = time.perf_counter()
         if _has_audio(source):
-            segments = _translate_transcript(transcribe(source, whisper_model))
-            package = generate_package(" ".join(s.vietnamese for s in segments))
+            source_segments = _translate_transcript(transcribe(source, whisper_model))
         else:
-            package = generate_package(trend)
-            segments = _segments_from_script(str(package.get("translation") or trend), source_info.duration)
-        ui.video_stage(1, "Whisper + AI translation", stage_started)
+            source_segments = _segments_from_script(trend, source_info.duration)
+        narration, narration_segments = _build_narration(source_segments, trend, source_info.duration or 10.0)
+        package = generate_package(narration)
+        ui.video_stage(1, "Whisper + AI editorial narration", stage_started)
+        ui.item("INFO", f"Narration: {len(narration.split())} words | covers {source_info.duration:.1f}s")
 
         stem = f"video-{index:02d}-{source.stem}"
         stage_started = time.perf_counter()
-        subtitle = write_srt(segments, out / f"{stem}.vi.srt")
-        ui.video_stage(2, "Vietnamese subtitles (SRT)", stage_started)
+        subtitle = write_srt(narration_segments, out / f"{stem}.vi.srt")
+        ui.video_stage(2, "Full-video Vietnamese subtitles", stage_started)
 
         title = str(package.get("title") or trend).strip()
         hashtags = package.get("hashtags", [])
         hashtag_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
-        narration = " ".join(s.vietnamese for s in segments).strip()
 
         stage_started = time.perf_counter()
         voice = synthesize_speech(narration, out / f"{stem}.vi.mp3")
-        ui.video_stage(3, "Vietnamese voice / TTS", stage_started)
+        ui.video_stage(3, "Professional Vietnamese narration / TTS", stage_started)
 
         stage_started = time.perf_counter()
         final_video = render_final(source, subtitle, voice, out / f"{stem}.final.mp4")
         final_info = validate_video(final_video, min_seconds=10.0, require_audio=True)
-        ui.video_stage(4, "FFmpeg 9:16 + subtitles + audio", stage_started)
+        ui.video_stage(4, "FFmpeg 9:16 + narration + subtitles", stage_started)
 
         stage_started = time.perf_counter()
         published = "not_requested"
@@ -209,11 +243,11 @@ def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: s
         ui.item("->", f"Video : {final_video}")
         ui.item("->", f"Title : {title}")
         ui.item("->", f"Tags  : {hashtag_text}")
-        return {"index": index, "source": "douyin", "source_url": source_url, "input_video": str(source), "subtitle_file": str(subtitle), "output_video": str(final_video), "duration_seconds": round(final_info.duration or 0, 2), "title": title, "hashtags": hashtag_text, "status": status, "published": published, "error": "", "elapsed_seconds": round(elapsed, 2)}
+        return {"index": index, "source": "douyin", "source_url": source_url, "input_video": str(source), "subtitle_file": str(subtitle), "output_video": str(final_video), "duration_seconds": round(final_info.duration or 0, 2), "narration_words": len(narration.split()), "title": title, "hashtags": hashtag_text, "status": status, "published": published, "error": "", "elapsed_seconds": round(elapsed, 2)}
     except Exception as exc:
         elapsed = time.perf_counter() - started
         ui.item("ERR", f"Failed after {elapsed:.1f}s: {exc}")
-        return {"index": index, "source": "douyin", "source_url": source_url, "input_video": str(source), "subtitle_file": "", "output_video": "", "duration_seconds": 0, "title": "", "hashtags": "", "status": "failed", "published": "not_requested", "error": str(exc), "elapsed_seconds": round(elapsed, 2)}
+        return {"index": index, "source": "douyin", "source_url": source_url, "input_video": str(source), "subtitle_file": "", "output_video": "", "duration_seconds": 0, "narration_words": 0, "title": "", "hashtags": "", "status": "failed", "published": "not_requested", "error": str(exc), "elapsed_seconds": round(elapsed, 2)}
 
 
 def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoResult:
@@ -231,12 +265,12 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
     if publish_mode not in {"none", "tiktok", "youtube"}:
         raise RuntimeError("OPENPILOT_PUBLISH must be none, tiktok, or youtube.")
 
-    ui.phase(3, "CONTENT PROCESSING", "Validated source -> clean speech -> Vietnamese -> subtitles -> TTS -> final MP4")
+    ui.phase(3, "CONTENT PROCESSING", "Whisper -> editorial narration -> full-video subtitles -> TTS -> final MP4")
     results = [_process_one(ui, i, trend, source, url, out, whisper_model, publish_mode) for i, (source, url) in enumerate(videos, 1)]
     success = sum(r["status"] in {"ready_for_publish", "published"} for r in results)
     failed = len(results) - success
     manifest_path = out / "auto-manifest.json"
-    manifest_path.write_text(json.dumps({"version": "0.7", "trend": trend, "source_policy": "douyin_only", "minimum_duration_exclusive_seconds": 10, "requested": target, "acquired": len(videos), "completed": success, "failed": failed, "publish_mode": publish_mode, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps({"version": "0.8", "trend": trend, "source_policy": "douyin_only", "minimum_duration_exclusive_seconds": 10, "narration": {"enabled": True, "style": "modern_professional_full_video", "target_words_per_second": 2.25}, "requested": target, "acquired": len(videos), "completed": success, "failed": failed, "publish_mode": publish_mode, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     ui.phase(8, "FINAL REPORT", "Batch processing finished"); ui.finish(success, failed)
     first = next((r for r in results if r["status"] != "failed"), results[0] if results else {})
