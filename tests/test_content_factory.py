@@ -1,37 +1,32 @@
 from pathlib import Path
 
-from openpilot.publishers import ManualPublisher
+from openpilot.ai_content import _clean_title, _normalize_hashtags
 from openpilot.subtitles import write_srt
-from openpilot.translation import SimpleTranslator, translate_segments
-from openpilot.trends import ManualTrendSource, TrendCandidate
+from openpilot.transcription import TranscriptSegment
 
 
-def test_srt_writer(tmp_path: Path):
-    class Segment:
-        start = 0.0
-        end = 2.5
-        text = "Hello"
-
-    path = write_srt([Segment()], tmp_path / "x.srt")
-    assert "00:00:00,000 --> 00:00:02,500" in path.read_text(encoding="utf-8")
+def test_hashtags_are_unique_and_bounded():
+    tags = _normalize_hashtags(["#TinTuc", "#tintuc", "Viet Nam", "#A", "#B", "#C", "#D", "#E", "#F", "#G"])
+    assert tags[0] == "#TinTuc"
+    assert len(tags) == 8
+    assert len({tag.casefold() for tag in tags}) == len(tags)
+    assert all(tag.startswith("#") for tag in tags)
 
 
-def test_translation_interface():
-    class Segment:
-        text = "Xin chao"
-
-    result = translate_segments([Segment()], SimpleTranslator())
-    assert result[0].vietnamese == "Xin chao"
+def test_title_cleanup():
+    assert _clean_title('  "Tiêu đề\nđẹp!!!"  ', "fallback") == "Tiêu đề đẹp!!!"
 
 
-def test_trend_source_sorts_by_score():
-    source = ManualTrendSource([
-        TrendCandidate("low", "u1", "douyin", 50),
-        TrendCandidate("high", "u2", "douyin", 90),
-    ])
-    assert source.trending(1)[0].title == "high"
-
-
-def test_publisher_is_dry_run():
-    result = ManualPublisher("youtube_shorts").publish("video.mp4", "Demo")
-    assert result.status == "dry_run"
+def test_srt_is_readable_and_sequential(tmp_path: Path):
+    segments = [
+        TranscriptSegment(0.0, 2.2, "Hello world"),
+        TranscriptSegment(2.2, 5.5, "Second sentence with enough words to wrap onto another subtitle line."),
+    ]
+    segments[0].vietnamese = "Xin chào mọi người"
+    segments[1].vietnamese = "Đây là câu phụ đề tiếng Việt dài để kiểm tra xuống dòng."
+    target = write_srt(segments, tmp_path / "test.srt")
+    text = target.read_text(encoding="utf-8")
+    assert "1\n00:00:00,000 --> 00:00:02,200" in text
+    assert "2\n00:00:02,200 --> 00:00:05,500" in text
+    assert "Xin chào mọi người" in text
+    assert target.exists()
