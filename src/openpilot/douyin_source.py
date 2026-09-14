@@ -155,34 +155,64 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
     return found[:candidate_limit]
 
 
+def _chrome_profile_available() -> bool:
+    local = os.getenv("LOCALAPPDATA", "")
+    appdata = os.getenv("APPDATA", "")
+    candidates = [
+        Path(local) / "Google" / "Chrome" / "User Data",
+        Path(appdata) / "Google" / "Chrome" / "User Data",
+        Path(local) / "Microsoft" / "Edge" / "User Data",
+    ]
+    return any(path.is_dir() for path in candidates)
+
+
+def _run_ytdlp(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
+    except FileNotFoundError:
+        command[0:1] = [os.environ.get("PYTHON", "python"), "-m", "yt_dlp"]
+        return subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
+
+
 def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"douyin-{index:02d}.mp4"
-    command = ["yt-dlp", "--no-playlist", "--format", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b", "--merge-output-format", "mp4", "--output", str(target)]
+    base = ["yt-dlp", "--no-playlist", "--format", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b", "--merge-output-format", "mp4", "--output", str(target)]
     cookies = os.getenv("OPENPILOT_DOUYIN_COOKIES", "").strip()
     if cookies:
         cookie_path = Path(cookies).expanduser()
         if not cookie_path.is_file():
             raise RuntimeError(f"Douyin cookie file not found: {cookie_path}")
-        command.extend(["--cookies", str(cookie_path)])
-    command.append(url)
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
-    except FileNotFoundError:
-        command[0:1] = [os.environ.get("PYTHON", "python"), "-m", "yt_dlp"]
-        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
+        base.extend(["--cookies", str(cookie_path)])
+    base.append(url)
 
+    result = _run_ytdlp(base)
     if result.returncode == 0 and target.exists() and target.stat().st_size > 0:
         return target, url
 
     error_text = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
-    if "Fresh cookies" in error_text or "Failed to parse JSON" in error_text or result.returncode != 0:
-        for media_url in browser_media_urls(url)[:8]:
-            try:
-                if download_media(media_url, target, url):
-                    return target, url
-            except Exception:
-                continue
+
+    # Douyin now frequently rejects a clean yt-dlp session with "Fresh cookies".
+    # If Chrome/Edge has a normal local profile, let yt-dlp read that browser's
+    # current cookies. This is ordinary authenticated/public-browser access;
+    # it does not bypass CAPTCHA, DRM, or other access controls.
+    if not cookies and _chrome_profile_available():
+        for browser in ("chrome", "edge"):
+            browser_command = base[:-1] + ["--cookies-from-browser", browser, url]
+            browser_result = _run_ytdlp(browser_command)
+            if browser_result.returncode == 0 and target.exists() and target.stat().st_size > 0:
+                return target, url
+            error_text = ((browser_result.stderr or "") + "\n" + (browser_result.stdout or "")).strip() or error_text
+
+    # Last normal-public-page fallback: render the page in Chromium and read
+    # media URLs exposed to the page. No challenge solving or private API use.
+    media_urls = browser_media_urls(url)
+    for media_url in media_urls[:8]:
+        try:
+            if download_media(media_url, target, url):
+                return target, url
+        except Exception:
+            continue
 
     lines = error_text.splitlines()
     detail = lines[-1] if lines else "unknown error"
