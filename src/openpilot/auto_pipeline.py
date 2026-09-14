@@ -62,7 +62,7 @@ class AutoUI:
             print(f"        {detail}", flush=True)
 
     def item(self, icon: str, message: str) -> None:
-        print(f"        {icon:<4} {message}", flush=True)
+        print(f"        {icon:<5} {message}", flush=True)
 
     def video_header(self, index: int, name: str) -> None:
         print(f"\n  +---------------- VIDEO {index:02d}/{self.total:02d} ----------------+", flush=True)
@@ -124,7 +124,6 @@ def discover_trend() -> str:
             return title
     except (urllib.error.URLError, ET.ParseError) as exc:
         print(f"[TREND] News unavailable: {exc}", flush=True)
-
     fallback = os.getenv("OPENPILOT_TREND_FALLBACK", "Cùng Việt Nam tiến bước")
     print(f"[TREND] Using local fallback topic: {fallback}", flush=True)
     return fallback
@@ -136,9 +135,9 @@ def _has_audio(path: Path) -> bool:
 
 
 def _translate_transcript(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
-    translated = translate_segments([s.text for s in segments])
+    translations = translate_segments([s.text for s in segments])
     clean: list[TranscriptSegment] = []
-    for segment, text in zip(segments, translated):
+    for segment, text in zip(segments, translations):
         text = " ".join(text.split()).strip()
         if text:
             segment.vietnamese = text
@@ -155,7 +154,10 @@ def _segments_from_script(text: str, duration: float | None) -> list[TranscriptS
     total = max(float(duration or 5.0), 5.0)
     sentences = [x.strip() for x in clean.replace("!", ".").replace("?", ".").split(".") if x.strip()] or [clean]
     step = total / len(sentences)
-    return [TranscriptSegment(i * step, min(total, (i + 1) * step), s, s) for i, s in enumerate(sentences)]
+    result = [TranscriptSegment(i * step, min(total, (i + 1) * step), sentence) for i, sentence in enumerate(sentences)]
+    for segment in result:
+        segment.vietnamese = segment.text
+    return result
 
 
 def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: str, out: Path, whisper_model: str, publish_mode: str) -> dict:
@@ -163,17 +165,15 @@ def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: s
     started = time.perf_counter()
     try:
         source_info = validate_video(source, min_seconds=10.0)
-        ui.item("INFO", f"Source: {source_info.width}x{source_info.height} | {source_info.duration:.1f}s")
+        ui.item("INFO", f"Source {source_info.width}x{source_info.height} | {source_info.duration:.1f}s")
 
         stage_started = time.perf_counter()
         if _has_audio(source):
             segments = _translate_transcript(transcribe(source, whisper_model))
-            translated_text = " ".join(s.vietnamese for s in segments)
-            package = generate_package(translated_text)
+            package = generate_package(" ".join(s.vietnamese for s in segments))
         else:
             package = generate_package(trend)
-            narration = str(package.get("translation") or trend).strip()
-            segments = _segments_from_script(narration, source_info.duration)
+            segments = _segments_from_script(str(package.get("translation") or trend), source_info.duration)
         ui.video_stage(1, "Whisper + AI translation", stage_started)
 
         stem = f"video-{index:02d}-{source.stem}"
@@ -199,15 +199,13 @@ def _process_one(ui: AutoUI, index: int, trend: str, source: Path, source_url: s
         published = "not_requested"
         status = "ready_for_publish"
         if publish_mode == "tiktok":
-            published = publish_tiktok(str(final_video), f"{title} {hashtag_text}".strip())
-            status = "published"
+            published = publish_tiktok(str(final_video), f"{title} {hashtag_text}".strip()); status = "published"
         elif publish_mode == "youtube":
-            published = publish_youtube(str(final_video), title, f"{package.get('description', '')}\n\n{hashtag_text}")
-            status = "published"
+            published = publish_youtube(str(final_video), title, f"{package.get('description', '')}\n\n{hashtag_text}"); status = "published"
         ui.video_stage(5, "Official publishing", stage_started)
 
         elapsed = time.perf_counter() - started
-        ui.item("OK", f"Completed in {elapsed:.1f}s | final={final_info.width}x{final_info.height} | {final_info.duration:.1f}s")
+        ui.item("OK", f"Completed in {elapsed:.1f}s | {final_info.width}x{final_info.height} | {final_info.duration:.1f}s")
         ui.item("->", f"Video : {final_video}")
         ui.item("->", f"Title : {title}")
         ui.item("->", f"Tags  : {hashtag_text}")
@@ -225,7 +223,6 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
 
     ui.phase(1, "TREND DISCOVERY", "Finding a current topic for the Douyin search")
     trend = discover_trend(); ui.item("OK", f"Trend: {trend}")
-
     ui.phase(2, "DOUYIN ACQUISITION", f"Searching for {target} videos | strict duration >10s")
     videos = acquire_douyin_batch(trend, out / "source" / "douyin", target)
     ui.item("OK", f"Downloaded {len(videos)}/{target} Douyin videos")
@@ -234,11 +231,10 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
     if publish_mode not in {"none", "tiktok", "youtube"}:
         raise RuntimeError("OPENPILOT_PUBLISH must be none, tiktok, or youtube.")
 
-    ui.phase(3, "CONTENT PROCESSING", "Validated video -> clean speech -> Vietnamese -> subtitles -> voice -> final MP4")
+    ui.phase(3, "CONTENT PROCESSING", "Validated source -> clean speech -> Vietnamese -> subtitles -> TTS -> final MP4")
     results = [_process_one(ui, i, trend, source, url, out, whisper_model, publish_mode) for i, (source, url) in enumerate(videos, 1)]
     success = sum(r["status"] in {"ready_for_publish", "published"} for r in results)
     failed = len(results) - success
-
     manifest_path = out / "auto-manifest.json"
     manifest_path.write_text(json.dumps({"version": "0.7", "trend": trend, "source_policy": "douyin_only", "minimum_duration_exclusive_seconds": 10, "requested": target, "acquired": len(videos), "completed": success, "failed": failed, "publish_mode": publish_mode, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
 
