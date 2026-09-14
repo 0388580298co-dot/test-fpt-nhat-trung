@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ai_content import generate_package, synthesize_speech, translate_segments
-from .douyin_source import acquire_douyin
+from .douyin_source import acquire_douyin_batch
 from .media import make_vertical, probe
 from .official_publishers import publish_tiktok, publish_youtube
 from .subtitles import write_srt
@@ -33,7 +33,6 @@ class AutoResult:
 
 
 def _progress(step: int, total: int, message: str) -> None:
-    """Print a UTF-8-safe progress line and flush it immediately."""
     print(f"[{step}/{total}] {message}", flush=True)
 
 
@@ -54,7 +53,6 @@ def _get_json(url: str, headers: dict[str, str] | None = None, api_name: str = "
 
 
 def _discover_trend_from_news(query: str) -> str:
-    """Free trend fallback using Google News RSS; no API key is required."""
     params = urllib.parse.urlencode({"q": query, "hl": "vi", "gl": "VN", "ceid": "VN:vi"})
     request = urllib.request.Request(
         f"https://news.google.com/rss/search?{params}",
@@ -112,7 +110,6 @@ def _download(url: str, target: Path, source_name: str) -> Path:
 
 
 def _acquire_commons_video(query: str, output_dir: Path) -> tuple[Path, str]:
-    """Use Wikimedia Commons' public API for freely licensed media; no API key."""
     terms = [query, "nature landscape", "city street"]
     for term in terms:
         params = urllib.parse.urlencode({
@@ -147,18 +144,23 @@ def _acquire_commons_video(query: str, output_dir: Path) -> tuple[Path, str]:
 
 
 def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
-    """Prefer public Douyin discovery, then use existing free fallbacks.
+    """Prefer Douyin, but keep AUTO alive when Douyin is inaccessible.
 
-    The Douyin adapter uses ordinary public search/download access only. It does
-    not pass cookies, login credentials, CAPTCHA workarounds, or anti-bot bypasses.
+    OPENPILOT_SOURCE=douyin makes Douyin mandatory. OPENPILOT_SOURCE=auto (the
+    default) tries up to 10 discovered Douyin candidates and then falls back to
+    Pexels or Wikimedia Commons. No CAPTCHA, DRM, or anti-bot bypass is used.
     """
-    source = os.getenv("OPENPILOT_SOURCE", "douyin").lower()
+    source = os.getenv("OPENPILOT_SOURCE", "auto").lower()
     if source in {"douyin", "auto"}:
         try:
-            return acquire_douyin(query, output_dir / "douyin", limit=10)
-        except RuntimeError:
+            candidates = acquire_douyin_batch(query, output_dir / "douyin", limit=10)
+            return candidates[0]
+        except RuntimeError as exc:
             if source == "douyin":
                 raise
+            print(f"[4/8] Douyin không tải được: {exc}", flush=True)
+            print("[4/8] Chuyển sang nguồn video công khai dự phòng...", flush=True)
+
     if source in {"pexels", "auto", "fallback"}:
         key = os.getenv("PEXELS_API_KEY")
         if key:
@@ -205,37 +207,30 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
 
     _progress(2, 8, "Đang tìm video Douyin...")
     source, source_url = acquire_video(trend, out / "source")
-    _progress(3, 8, f"Đã tìm thấy video: {source.name}")
+    _progress(5, 8, f"Đã chọn video: {source.name}")
 
-    _progress(4, 8, "Đang chuẩn bị và tải/đọc video...")
+    _progress(6, 8, "Đang nhận diện và xử lý nội dung...")
     has_audio = _has_audio(source)
-
     if has_audio:
-        _progress(5, 8, "Đang nhận diện tiếng Trung bằng Whisper...")
         segments = transcribe(source, whisper_model)
         source_text = " ".join(s.text for s in segments)
         package = generate_package(source_text or trend)
-        _progress(6, 8, "Đang dịch tiếng Trung sang tiếng Việt...")
         translated = translate_segments([s.text for s in segments]) if segments else [str(package.get("translation", trend))]
         for seg, vi in zip(segments, translated):
             seg.vietnamese = vi
     else:
-        _progress(5, 8, "Video không có âm thanh; đang tạo nội dung tiếng Việt...")
         package = generate_package(trend)
         narration = str(package.get("translation") or trend).strip()
         info = probe(source)
         segments = _segments_from_script(narration, info.duration)
         for seg in segments:
             seg.vietnamese = seg.text
-        _progress(6, 8, "Đã tạo nội dung và phụ đề tiếng Việt...")
 
     subtitle = write_srt(segments, out / f"{source.stem}.vi.srt")
     title = str(package.get("title", trend)).strip()
     hashtags = package.get("hashtags", [])
     hashtag_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
-    narration_text = " ".join(getattr(s, "vietnamese", s.text) for s in segments).strip()
-    if not narration_text:
-        narration_text = str(package.get("translation") or trend).strip()
+    narration_text = " ".join(getattr(s, "vietnamese", s.text) for s in segments).strip() or str(package.get("translation") or trend).strip()
 
     _progress(7, 8, "Đang tạo giọng Việt...")
     voice = synthesize_speech(narration_text, out / f"{source.stem}.vi.mp3")
