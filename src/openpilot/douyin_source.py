@@ -28,30 +28,43 @@ PUBLIC_DOYIN_SEEDS = [
     "https://www.douyin.com/video/7389553837012487487",
 ]
 
+MIN_VIDEO_SECONDS = 10.0
+
+
+def _video_duration(path: Path) -> float | None:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return float((result.stdout or "").strip())
+    except ValueError:
+        return None
+
 
 def _is_valid_video(path: Path) -> bool:
-    """Reject HTML/JSON/partial CDN chunks saved with an .mp4 extension."""
+    """Accept only complete playable videos strictly longer than 10 seconds."""
     if not path.exists() or path.stat().st_size < 100_000:
         return False
     try:
         result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=format_name,duration",
-                "-show_entries", "stream=codec_type,codec_name,width,height",
-                "-of", "json", str(path),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
+            ["ffprobe", "-v", "error", "-show_entries", "format=format_name,duration", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", str(path)],
+            capture_output=True, text=True, check=False, timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     if result.returncode != 0:
         return False
     text = result.stdout or ""
-    return '"codec_type": "video"' in text and '"duration"' in text
+    if '"codec_type": "video"' not in text or '"duration"' not in text:
+        return False
+    duration = _video_duration(path)
+    return duration is not None and duration > MIN_VIDEO_SECONDS
 
 
 def _discard_invalid_video(path: Path) -> None:
@@ -59,6 +72,10 @@ def _discard_invalid_video(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def _duration_or_zero(path: Path) -> float:
+    return _video_duration(path) or 0.0
 
 
 def _extract_urls(page: str, limit: int) -> list[str]:
@@ -124,9 +141,7 @@ def _direct_douyin_urls(query: str, limit: int) -> list[str]:
         pages = [
             f"https://www.douyin.com/search/{quote_plus(term)}?type=video",
             f"https://www.douyin.com/search/?type=video&keyword={quote_plus(term)}",
-            "https://www.douyin.com/shipin/",
-            "https://www.douyin.com/hot",
-            "https://jingxuan.douyin.com/",
+            "https://www.douyin.com/shipin/", "https://www.douyin.com/hot", "https://jingxuan.douyin.com/",
         ]
         for page in pages:
             try:
@@ -190,10 +205,7 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
 def _chrome_profile_available() -> bool:
     local = os.getenv("LOCALAPPDATA", "")
     appdata = os.getenv("APPDATA", "")
-    return any((Path(p) / "User Data").is_dir() for p in (
-        Path(local) / "Google" / "Chrome",
-        Path(appdata) / "Google" / "Chrome",
-    ))
+    return any((Path(p) / "User Data").is_dir() for p in (Path(local) / "Google" / "Chrome", Path(appdata) / "Google" / "Chrome"))
 
 
 def _run_ytdlp(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -219,9 +231,14 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
     print("[DOUYIN]   Direct public download...", flush=True)
     result = _run_ytdlp(base)
     if result.returncode == 0 and target.exists() and _is_valid_video(target):
+        print(f"[DOUYIN]   Direct video duration: {_duration_or_zero(target):.1f}s", flush=True)
         return target, url
     if target.exists():
-        print("[DOUYIN]   Direct download produced an invalid/partial MP4 -> discard", flush=True)
+        duration = _duration_or_zero(target)
+        if duration <= MIN_VIDEO_SECONDS:
+            print(f"[DOUYIN]   Direct video too short ({duration:.1f}s <= {MIN_VIDEO_SECONDS:.0f}s) -> discard", flush=True)
+        else:
+            print("[DOUYIN]   Direct download produced an invalid/partial MP4 -> discard", flush=True)
         _discard_invalid_video(target)
     direct_error = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
 
@@ -231,8 +248,12 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
             browser_command = base[:-1] + ["--cookies-from-browser", f"chrome:{profile}", url]
             browser_result = _run_ytdlp(browser_command)
             if browser_result.returncode == 0 and target.exists() and _is_valid_video(target):
+                print(f"[DOUYIN]   Chrome video duration: {_duration_or_zero(target):.1f}s", flush=True)
                 return target, url
             if target.exists():
+                duration = _duration_or_zero(target)
+                if duration <= MIN_VIDEO_SECONDS:
+                    print(f"[DOUYIN]   Chrome video too short ({duration:.1f}s <= {MIN_VIDEO_SECONDS:.0f}s) -> discard", flush=True)
                 _discard_invalid_video(target)
             print(f"[DOUYIN]   Chrome {profile}: unavailable/failed", flush=True)
 
@@ -243,9 +264,14 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
         try:
             print(f"[DOUYIN]   Browser media {media_number}/{min(len(media_urls), 8)}...", flush=True)
             if download_media(media_url, target, url):
+                duration = _duration_or_zero(target)
                 if _is_valid_video(target):
+                    print(f"[DOUYIN]   Browser video duration: {duration:.1f}s", flush=True)
                     return target, url
-                print("[DOUYIN]   Browser media returned bytes, but ffprobe rejected the file -> discard", flush=True)
+                if duration <= MIN_VIDEO_SECONDS and duration > 0:
+                    print(f"[DOUYIN]   Browser video too short ({duration:.1f}s <= {MIN_VIDEO_SECONDS:.0f}s) -> discard", flush=True)
+                else:
+                    print("[DOUYIN]   Browser media returned bytes, but ffprobe rejected the file -> discard", flush=True)
                 _discard_invalid_video(target)
         except Exception as exc:
             print(f"[DOUYIN]   Browser media failed: {exc}", flush=True)
@@ -253,7 +279,7 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
             continue
 
     if media_urls:
-        raise RuntimeError("Browser exposed media URLs, but no complete playable video could be downloaded")
+        raise RuntimeError(f"No complete playable Douyin video longer than {MIN_VIDEO_SECONDS:.0f} seconds could be downloaded")
     if "Extracting cookies from edge" in direct_error:
         raise RuntimeError("No browser-exposed public media URL found (Edge cookie fallback skipped)")
     lines = direct_error.splitlines()
@@ -269,7 +295,7 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
         raise RuntimeError(f"No public Douyin video URLs were discovered for '{query}'.")
     successes: list[tuple[Path, str]] = []
     errors: list[str] = []
-    print(f"[DOUYIN] Candidates found: {len(urls)} | Target: {requested}", flush=True)
+    print(f"[DOUYIN] Candidates found: {len(urls)} | Target: {requested} | Minimum duration: >{MIN_VIDEO_SECONDS:.0f}s", flush=True)
     for index, url in enumerate(urls, 1):
         if len(successes) >= requested:
             break
@@ -277,14 +303,14 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
         try:
             item = _download_public_url(url, output_dir, len(successes) + 1)
             successes.append(item)
-            print(f"[DOUYIN]   OK  {item[0].name} | total={len(successes)}/{requested}", flush=True)
+            print(f"[DOUYIN]   OK  {item[0].name} | duration={_duration_or_zero(item[0]):.1f}s | total={len(successes)}/{requested}", flush=True)
         except Exception as exc:
             errors.append(str(exc))
             print(f"[DOUYIN]   SKIP {exc}", flush=True)
     print(f"[DOUYIN] Result: {len(successes)}/{requested} downloaded", flush=True)
     if not successes:
-        detail = errors[-1] if errors else "all discovered URLs were inaccessible"
-        raise RuntimeError(f"No accessible public Douyin video found for '{query}'. {detail}")
+        detail = errors[-1] if errors else "all discovered URLs were inaccessible or shorter than 10 seconds"
+        raise RuntimeError(f"No accessible public Douyin video longer than {MIN_VIDEO_SECONDS:.0f} seconds found for '{query}'. {detail}")
     return successes
 
 
