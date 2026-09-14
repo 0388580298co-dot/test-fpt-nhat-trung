@@ -32,7 +32,7 @@ def probe(path: str | Path) -> MediaInfo:
         raise MediaError("ffprobe is required. Install FFmpeg and add it to PATH.")
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "format=duration:stream=width,height,codec_name,codec_type",
+        "-show_entries", "format=duration:stream=width,height,codec_name,codec_type,profile,pix_fmt,level",
         "-of", "json", str(p),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
@@ -53,7 +53,7 @@ def _validate_output(path: Path) -> None:
 
 
 def make_vertical(input_path: str | Path, output_path: str | Path) -> Path:
-    """Create a Windows/player-friendly 9:16 H.264/AAC MP4 with fast-start metadata."""
+    """Create a Windows-compatible 9:16 H.264 MP4 video track."""
     require_ffmpeg()
     source = Path(input_path)
     out = Path(output_path)
@@ -62,11 +62,15 @@ def make_vertical(input_path: str | Path, output_path: str | Path) -> Path:
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
     cmd = [
         "ffmpeg", "-y", "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a:0?",
+        "-map", "0:v:0",
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "20",
+        "-profile:v", "main",
+        "-level:v", "4.0",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
+        "-an",
         "-movflags", "+faststart",
         str(temp),
     ]
