@@ -8,11 +8,11 @@ from pathlib import Path
 from urllib.parse import quote_plus, unquote
 from urllib.request import Request, urlopen
 
+from .douyin_browser import browser_media_urls, download_media
+
 DOUYIN_VIDEO_RE = re.compile(r"https?://(?:www\.)?douyin\.com/video/\d+|https?://jingxuan\.douyin\.com/m/video/\d+|https?://(?:www\.)?douyin\.com/shipin/\d+|https?://v\.douyin\.com/[A-Za-z0-9_-]+/?")
 DOUYIN_ID_RE = re.compile(r"(?:aweme_id|awemeId|itemId|item_id|video_id)[\"'=: ]+([0-9]{8,30})")
 
-# Public Douyin pages observed from current web indexing. These are only a
-# last-resort discovery seed; downloads still go through yt-dlp normally.
 PUBLIC_DOYIN_SEEDS = [
     "https://jingxuan.douyin.com/m/video/7684491888073690374",
     "https://jingxuan.douyin.com/m/video/7683816814459063592",
@@ -32,25 +32,17 @@ PUBLIC_DOYIN_SEEDS = [
 def _extract_urls(page: str, limit: int) -> list[str]:
     page = unquote(html.unescape(page)).replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
     found: list[str] = []
-
-    def add(url: str) -> bool:
+    for url in DOUYIN_VIDEO_RE.findall(page):
         url = url.rstrip(".,);\"'")
-        if url.startswith("//"):
-            url = "https:" + url
-        if url.startswith("/"):
-            host = "https://jingxuan.douyin.com" if url.startswith("/m/video/") else "https://www.douyin.com"
-            url = host + url
-        if not any(x in url for x in ("/video/", "/shipin/", "/m/video/")):
-            return False
         if url not in found:
             found.append(url)
-        return len(found) >= limit
-
-    for url in DOUYIN_VIDEO_RE.findall(page):
-        if add(url):
+        if len(found) >= limit:
             return found
     for video_id in DOUYIN_ID_RE.findall(page):
-        if add(f"https://www.douyin.com/video/{video_id}"):
+        url = f"https://www.douyin.com/video/{video_id}"
+        if url not in found:
+            found.append(url)
+        if len(found) >= limit:
             return found
     return found
 
@@ -69,19 +61,13 @@ def _query_variants(query: str) -> list[str]:
     clean = re.sub(r"\s+", " ", query).strip()
     clean = re.sub(r"\s*[-–—|]\s*(Đài Phát thanh.*|VTV.*|Báo.*)$", "", clean, flags=re.I)
     words = clean.split()
-    return list(dict.fromkeys(x for x in [
-        clean, " ".join(words[:8]), "Vietnam", "越南", "越南 热门", "热点 新闻", "热门 视频", "抖音 热门", "今日热点"
-    ] if x))
+    return list(dict.fromkeys(x for x in [clean, " ".join(words[:8]), "Vietnam", "越南", "越南 热门", "热点 新闻", "热门 视频", "抖音 热门", "今日热点"] if x))
 
 
 def _search_engine_urls(query: str, limit: int) -> list[str]:
     found: list[str] = []
     for term in _query_variants(query):
-        searches = [
-            f"site:douyin.com/video {term}",
-            f"site:jingxuan.douyin.com/m/video {term}",
-        ]
-        for search in searches:
+        for search in (f"site:douyin.com/video {term}", f"site:jingxuan.douyin.com/m/video {term}"):
             for base in (
                 f"https://www.google.com/search?q={quote_plus(search)}&num=50&hl=en",
                 f"https://www.bing.com/search?q={quote_plus(search)}&count=50",
@@ -124,12 +110,7 @@ def _direct_douyin_urls(query: str, limit: int) -> list[str]:
 
 
 def _yt_dlp_public_urls(query: str, limit: int) -> list[str]:
-    pages = [
-        "https://www.douyin.com/shipin/",
-        "https://www.douyin.com/hot",
-        "https://jingxuan.douyin.com/",
-        f"https://www.douyin.com/search/?type=video&keyword={quote_plus(query)}",
-    ]
+    pages = ["https://www.douyin.com/shipin/", "https://www.douyin.com/hot", "https://jingxuan.douyin.com/", f"https://www.douyin.com/search/?type=video&keyword={quote_plus(query)}"]
     found: list[str] = []
     for page in pages:
         command = ["yt-dlp", "--flat-playlist", "--skip-download", "--print", "%(webpage_url)s", "--playlist-end", str(max(limit * 3, 30)), page]
@@ -155,22 +136,17 @@ def _yt_dlp_public_urls(query: str, limit: int) -> list[str]:
 def _search_urls(query: str, limit: int = 10) -> list[str]:
     candidate_limit = max(limit * 5, 50)
     found: list[str] = []
-
     for source in (_direct_douyin_urls, _search_engine_urls):
         for url in source(query, candidate_limit):
             if url not in found:
                 found.append(url)
             if len(found) >= candidate_limit:
                 return found[:candidate_limit]
-
     for url in _yt_dlp_public_urls(query, candidate_limit):
         if url not in found:
             found.append(url)
         if len(found) >= candidate_limit:
             return found[:candidate_limit]
-
-    # Guaranteed Douyin-only fallback. The list is refreshed from public
-    # indexed Douyin pages and never substitutes another video provider.
     for url in PUBLIC_DOYIN_SEEDS:
         if url not in found:
             found.append(url)
@@ -195,11 +171,22 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
     except FileNotFoundError:
         command[0:1] = [os.environ.get("PYTHON", "python"), "-m", "yt_dlp"]
         result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
-    if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
-        lines = (result.stderr or result.stdout).strip().splitlines()
-        detail = lines[-1] if lines else "unknown error"
-        raise RuntimeError("Douyin download failed: " + detail)
-    return target, url
+
+    if result.returncode == 0 and target.exists() and target.stat().st_size > 0:
+        return target, url
+
+    error_text = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+    if "Fresh cookies" in error_text or "Failed to parse JSON" in error_text or result.returncode != 0:
+        for media_url in browser_media_urls(url)[:8]:
+            try:
+                if download_media(media_url, target, url):
+                    return target, url
+            except Exception:
+                continue
+
+    lines = error_text.splitlines()
+    detail = lines[-1] if lines else "unknown error"
+    raise RuntimeError("Douyin download failed: " + detail)
 
 
 def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
