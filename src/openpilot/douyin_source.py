@@ -66,8 +66,7 @@ def _search_direct_douyin(query: str, limit: int) -> list[str]:
 
 
 def _search_urls(query: str, limit: int = 10) -> list[str]:
-    # Search substantially more candidates than the requested output count so
-    # inaccessible/removed videos do not prevent a 10-video batch.
+    # Search substantially more candidates than the requested output count.
     candidate_limit = max(limit * 5, 30)
     found: list[str] = []
     for url in _search_direct_douyin(query, candidate_limit):
@@ -83,9 +82,9 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
 
 
 def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, str]:
-    """Download with yt-dlp; optional cookies may be supplied by the account owner."""
+    """Download a public Douyin URL with yt-dlp."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / f"douyin-{index}.mp4"
+    target = output_dir / f"douyin-{index:02d}.mp4"
     command = [
         "yt-dlp",
         "--no-playlist",
@@ -110,31 +109,31 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
 
 
 def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
-    """Find and download up to ``limit`` accessible public Douyin videos.
+    """Find and download up to ``limit`` accessible Douyin videos.
 
-    The search gathers extra candidates so failed/removed URLs can be skipped.
-    A user-owned cookie file can be supplied through OPENPILOT_DOUYIN_COOKIES.
-    This uses ordinary yt-dlp access only: no CAPTCHA, DRM, credential theft,
-    watermark removal, or anti-bot bypass is performed.
+    Extra candidates are discovered so inaccessible/removed videos can be skipped.
+    Only Douyin URLs are accepted. Optional user-supplied cookies are supported;
+    no CAPTCHA, DRM, credential, watermark, or anti-bot bypass is performed.
     """
-    urls = _search_urls(query, limit=limit)
+    requested = max(1, int(limit))
+    urls = _search_urls(query, limit=requested)
     if not urls:
         raise RuntimeError(f"No public Douyin video URLs were indexed for '{query}'.")
 
     successes: list[tuple[Path, str]] = []
     errors: list[str] = []
-    print(f"[3/8] Tìm thấy {len(urls)} ứng viên Douyin để thử tải", flush=True)
+    print(f"[DOUYIN] Candidates: {len(urls)} | Target: {requested}", flush=True)
     for index, url in enumerate(urls, 1):
-        if len(successes) >= limit:
+        if len(successes) >= requested:
             break
-        print(f"[4/8] Đang thử tải ứng viên {index}/{len(urls)}...", flush=True)
+        print(f"[DOUYIN] Trying {index}/{len(urls)} | downloaded={len(successes)}/{requested}", flush=True)
         try:
             item = _download_public_url(url, output_dir, len(successes) + 1)
             successes.append(item)
-            print(f"       OK: đã tải được {len(successes)}/{limit} video", flush=True)
+            print(f"[DOUYIN]   OK  {item[0].name}", flush=True)
         except Exception as exc:
             errors.append(str(exc))
-            print(f"       Bỏ qua: {exc}", flush=True)
+            print(f"[DOUYIN]   SKIP {exc}", flush=True)
 
     if not successes:
         detail = errors[-1] if errors else "all discovered URLs were inaccessible"
@@ -143,5 +142,5 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
 
 
 def acquire_douyin(query: str, output_dir: Path, limit: int = 10) -> tuple[Path, str]:
-    """Compatibility wrapper: return the first successfully downloaded candidate."""
+    """Compatibility wrapper: return the first successfully downloaded Douyin video."""
     return acquire_douyin_batch(query, output_dir, limit=limit)[0]
