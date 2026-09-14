@@ -25,7 +25,7 @@ def main():
     video.add_argument("--output-dir", default="output")
     video.add_argument("--whisper-model", default="small")
     video.add_argument("--json", action="store_true")
-    auto = sub.add_parser("auto", help="Run trend -> permitted video -> AI Vietnamese -> voice -> render -> official publishing")
+    auto = sub.add_parser("auto", help="Run trend -> batch video acquisition -> AI Vietnamese -> voice -> 9:16 render -> optional official publishing")
     auto.add_argument("--output-dir", default="output")
     auto.add_argument("--whisper-model", default="small")
     auto.add_argument("--json", action="store_true")
@@ -56,11 +56,35 @@ def main():
     elif args.command == "auto":
         try: result = run_auto(args.output_dir, args.whisper_model)
         except Exception as exc: parser.error(str(exc))
-        payload = {"trend": result.trend, "source_url": result.source_url, "input_video": result.input_video, "subtitle_file": result.subtitle_file, "output_video": result.output_video, "status": result.status, "title": result.title, "hashtags": result.hashtags, "published": result.published, "message": result.message}
-        if args.json: print(json.dumps(payload, indent=2, ensure_ascii=False))
+        payload = {
+            "trend": result.trend, "batch_size": len(result.results), "source_url": result.source_url,
+            "input_video": result.input_video, "subtitle_file": result.subtitle_file, "output_video": result.output_video,
+            "status": result.status, "title": result.title, "hashtags": result.hashtags,
+            "published": result.published, "message": result.message, "results": result.results,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print("OpenPilot Studio - AUTO\n")
-            print(f"Trend:    {result.trend}\nVideo:    {result.output_video}\nSubtitle: {result.subtitle_file}\nTitle:    {result.title}\nHashtags: {result.hashtags}\nStatus:   {result.status}\nPublish:  {result.published}\n\n{result.message}")
+            print(f"Trend:       {result.trend}")
+            print(f"Batch:       {len(result.results)} video")
+            print(f"Status:      {result.status}")
+            print(f"Manifest:    {args.output_dir}\\auto-manifest.json")
+            print(f"\nVideo đầu tiên: {result.output_video}")
+            print(f"Subtitle:      {result.subtitle_file}")
+            print(f"Title:         {result.title}")
+            print(f"Hashtags:      {result.hashtags}")
+            print(f"Publish:       {result.published}")
+            print(f"\n{result.message}")
+            print("\nCác video thành công:")
+            for item in result.results:
+                if item["status"] != "failed":
+                    print(f"  {item['index']:02d}. {item['output_video']}")
+            failed = [item for item in result.results if item["status"] == "failed"]
+            if failed:
+                print("\nVideo lỗi:")
+                for item in failed:
+                    print(f"  {item['index']:02d}. {item['error']}")
 
 
 if __name__ == "__main__":
