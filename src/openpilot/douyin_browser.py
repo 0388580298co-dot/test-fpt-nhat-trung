@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-MEDIA_URL_RE = re.compile(r"https?://[^\"'<>\\s]+(?:\.mp4|\.m3u8)[^\"'<>\\s]*", re.I)
+MEDIA_URL_RE = re.compile(r"https?://[^\"'<>\\s]+(?:\.mp4|\.m3u8|/play/|playwm)[^\"'<>\\s]*", re.I)
 
 
 def _chrome_executable() -> str | None:
@@ -49,7 +49,7 @@ def browser_media_urls(url: str, timeout_ms: int = 45000) -> list[str]:
             )
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(6000)
             values = page.evaluate("""
                 () => {
                     const out = [];
@@ -64,6 +64,9 @@ def browser_media_urls(url: str, timeout_ms: int = 45000) -> list[str]:
                             if (value && (value.includes('.mp4') || value.includes('.m3u8') || value.includes('playwm') || value.includes('play/'))) add(value);
                         }
                     });
+                    for (const entry of performance.getEntriesByType('resource')) {
+                        add(entry.name);
+                    }
                     add(document.documentElement.innerHTML);
                     return out;
                 }
@@ -75,11 +78,8 @@ def browser_media_urls(url: str, timeout_ms: int = 45000) -> list[str]:
     found: list[str] = []
     for value in values:
         value = html.unescape(value).replace(r"\/", "/").replace(r"\u002F", "/")
-        matches = MEDIA_URL_RE.findall(value)
-        if not matches and value.startswith("http") and ("/play/" in value or "playwm" in value):
-            matches = [value]
-        for item in matches:
-            item = item.rstrip("\\\"'<>),;")
+        for item in MEDIA_URL_RE.findall(value):
+            item = item.rstrip("\\\"'<>),;]")
             if item not in found:
                 found.append(item)
     return found
