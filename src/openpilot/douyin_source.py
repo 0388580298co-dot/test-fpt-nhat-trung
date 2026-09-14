@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -37,13 +38,7 @@ def _fetch(url: str) -> str:
 
 
 def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
-    # Shorter keyword queries are much more likely to have indexed results than
-    # sending a long Vietnamese trend title verbatim.
-    variants = [
-        query,
-        " ".join(query.split()[:6]),
-        "热门 视频",
-    ]
+    variants = [query, " ".join(query.split()[:6]), "热门 视频"]
     found: list[str] = []
     for term in variants:
         if engine == "bing":
@@ -64,7 +59,6 @@ def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
 
 
 def _search_direct_douyin(query: str, limit: int) -> list[str]:
-    """Read the normal public Douyin search page when it exposes video links."""
     url = f"https://www.douyin.com/search/{quote_plus(query)}?type=general"
     try:
         return _extract_urls(_fetch(url), limit)
@@ -73,10 +67,7 @@ def _search_direct_douyin(query: str, limit: int) -> list[str]:
 
 
 def _search_urls(query: str, limit: int = 10) -> list[str]:
-    """Find publicly exposed Douyin video URLs using ordinary public pages/search."""
     found: list[str] = []
-
-    # Try Douyin's ordinary public search page first, then public search engines.
     for url in _search_direct_douyin(query, limit):
         if url not in found:
             found.append(url)
@@ -85,12 +76,12 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
             if url not in found:
                 found.append(url)
             if len(found) >= limit:
-                return found
+                return found[:limit]
     return found[:limit]
 
 
 def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, str]:
-    """Download a public Douyin URL with yt-dlp, without cookies or authentication."""
+    """Download with yt-dlp; optional cookies may be supplied by the account owner."""
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"douyin-{index}.mp4"
     command = [
@@ -99,31 +90,53 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
         "--format", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format", "mp4",
         "--output", str(target),
-        url,
     ]
+    cookies = os.getenv("OPENPILOT_DOUYIN_COOKIES", "").strip()
+    if cookies:
+        cookie_path = Path(cookies).expanduser()
+        if not cookie_path.is_file():
+            raise RuntimeError(f"Douyin cookie file not found: {cookie_path}")
+        command.extend(["--cookies", str(cookie_path)])
+    command.append(url)
+
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
-        detail = (result.stderr or result.stdout).strip().splitlines()[-1:]
-        raise RuntimeError("Douyin download failed: " + (detail[0] if detail else "unknown error"))
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        detail = lines[-1] if lines else "unknown error"
+        raise RuntimeError("Douyin download failed: " + detail)
     return target, url
 
 
-def acquire_douyin(query: str, output_dir: Path, limit: int = 10) -> tuple[Path, str]:
-    """Discover public URLs and return the first successfully downloaded video.
+def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
+    """Find up to ``limit`` public candidates and download every accessible one.
 
-    No login credentials, cookies, CAPTCHA workarounds, DRM removal, or anti-bot
-    bypasses are used. Inaccessible results are skipped.
+    If OPENPILOT_DOUYIN_COOKIES points to a cookie file explicitly supplied by the
+    user/account owner, yt-dlp may use it. This does not solve CAPTCHA challenges,
+    bypass anti-bot controls, remove DRM, or obtain credentials automatically.
+    Inaccessible candidates are skipped so one blocked video does not stop AUTO.
     """
     urls = _search_urls(query, limit=limit)
     if not urls:
         raise RuntimeError(f"No public Douyin video URLs were indexed for '{query}'.")
 
+    successes: list[tuple[Path, str]] = []
     errors: list[str] = []
+    print(f"[3/8] Tìm thấy {len(urls)} video Douyin để thử tải", flush=True)
     for index, url in enumerate(urls, 1):
+        print(f"[4/8] Đang thử tải video {index}/{len(urls)}...", flush=True)
         try:
-            return _download_public_url(url, output_dir, index)
+            item = _download_public_url(url, output_dir, index)
+            successes.append(item)
+            print(f"       OK video {index}/{len(urls)}", flush=True)
         except Exception as exc:
             errors.append(str(exc))
+            print(f"       Bỏ qua video {index}/{len(urls)}: {exc}", flush=True)
+    if not successes:
+        detail = errors[-1] if errors else "all discovered URLs were inaccessible"
+        raise RuntimeError(f"No accessible public Douyin video found for '{query}'. {detail}")
+    return successes
 
-    detail = errors[-1] if errors else "all discovered URLs were inaccessible"
-    raise RuntimeError(f"No accessible public Douyin video found for '{query}'. {detail}")
+
+def acquire_douyin(query: str, output_dir: Path, limit: int = 10) -> tuple[Path, str]:
+    """Compatibility wrapper: return the first successfully downloaded candidate."""
+    return acquire_douyin_batch(query, output_dir, limit=limit)[0]
