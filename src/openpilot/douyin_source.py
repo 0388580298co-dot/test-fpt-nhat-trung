@@ -9,27 +9,27 @@ from urllib.parse import quote_plus, unquote
 from urllib.request import Request, urlopen
 
 DOUYIN_VIDEO_RE = re.compile(
-    r"https?://(?:www\\.)?douyin\\.com/video/\\d+(?:[^\\\"'<>\\s&]|%[0-9A-Fa-f]{2})*|"
-    r"https?://v\\.douyin\\.com/[A-Za-z0-9_-]+/?|"
-    r"https?://(?:www\\.)?douyin\\.com/shipin/\\d+(?:[^\\\"'<>\\s]*)|"
-    r"https?://jingxuan\\.douyin\\.com/m/video/\\d+(?:[^\\\"'<>\\s]*)"
+    r"https?://(?:www\.)?douyin\.com/video/\d+(?:[^\"'<>\s&]|%[0-9A-Fa-f]{2})*|"
+    r"https?://v\.douyin\.com/[A-Za-z0-9_-]+/?|"
+    r"https?://(?:www\.)?douyin\.com/shipin/\d+(?:[^\"'<>\s]*)|"
+    r"https?://jingxuan\.douyin\.com/m/video/\d+(?:[^\"'<>\s]*)"
 )
 DOUYIN_RELATIVE_VIDEO_RE = re.compile(
-    r"(?:href=[\\\"']?|url\\()\\s*(?:https?:)?//(?:www\\.)?douyin\\.com/(?:video|shipin)/(\\d{8,30})|"
-    r"/(?:video|shipin)/(\\d{8,30})|"
-    r"(?:href=[\\\"']?|url\\()\\s*(?:https?:)?//jingxuan\\.douyin\\.com/m/video/(\\d{8,30})|"
-    r"/m/video/(\\d{8,30})"
+    r"(?:href=[\"']?|url\()\s*(?:https?:)?//(?:www\.)?douyin\.com/(?:video|shipin)/(\d{8,30})|"
+    r"/(?:video|shipin)/(\d{8,30})|"
+    r"(?:href=[\"']?|url\()\s*(?:https?:)?//jingxuan\.douyin\.com/m/video/(\d{8,30})|"
+    r"/m/video/(\d{8,30})"
 )
-DOUYIN_ID_RE = re.compile(r"(?:aweme_id|awemeId|itemId|item_id|video_id)[\\\"'=: ]+([0-9]{8,30})")
+DOUYIN_ID_RE = re.compile(r"(?:aweme_id|awemeId|itemId|item_id|video_id)[\"'=: ]+([0-9]{8,30})")
 
 
 def _extract_urls(page: str, limit: int) -> list[str]:
-    page = page.replace(r"\\/", "/").replace(r"\\u002F", "/").replace(r"\\u002f", "/")
+    page = page.replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
     page = unquote(html.unescape(page))
     found: list[str] = []
 
     def add(url: str) -> bool:
-        url = url.rstrip(".,);\\\"'")
+        url = url.rstrip(".,);\"'")
         if url.startswith("//"):
             url = "https:" + url
         if url.startswith("/"):
@@ -53,7 +53,9 @@ def _extract_urls(page: str, limit: int) -> list[str]:
         if not video_id:
             continue
         candidate = f"https://www.douyin.com/video/{video_id}"
-        if "/m/video/" in page[max(0, page.find(video_id) - 80:page.find(video_id) + 80]:
+        start = max(0, page.find(video_id) - 100)
+        end = page.find(video_id) + 100
+        if "/m/video/" in page[start:end]:
             candidate = f"https://jingxuan.douyin.com/m/video/{video_id}"
         if add(candidate):
             return found
@@ -74,8 +76,8 @@ def _fetch(url: str) -> str:
 
 
 def _query_variants(query: str) -> list[str]:
-    clean = re.sub(r"\\s+", " ", query).strip()
-    clean = re.sub(r"\\s*[-–—|]\\s*(Đài Phát thanh.*|VTV.*|Báo.*)$", "", clean, flags=re.I)
+    clean = re.sub(r"\s+", " ", query).strip()
+    clean = re.sub(r"\s*[-–—|]\s*(Đài Phát thanh.*|VTV.*|Báo.*)$", "", clean, flags=re.I)
     words = clean.split()
     variants = [clean, " ".join(words[:10]), "抖音 热门", "热门 视频", "热点 视频", "今日热点"]
     return list(dict.fromkeys(v for v in variants if v))
@@ -122,10 +124,9 @@ def _search_direct_douyin(query: str, limit: int) -> list[str]:
 
 
 def _yt_dlp_public_urls(query: str, limit: int) -> list[str]:
-    """Ask yt-dlp to enumerate ordinary public Douyin pages.
+    """Enumerate ordinary public Douyin pages with yt-dlp.
 
-    This is a discovery fallback only. It does not use CAPTCHA, DRM, login,
-    anti-bot, or access-control bypass mechanisms.
+    Discovery only; no CAPTCHA, DRM, login, anti-bot, or access-control bypass.
     """
     pages = [
         "https://www.douyin.com/shipin/",
@@ -184,8 +185,6 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
                 found.append(url)
             if len(found) >= candidate_limit:
                 return found[:candidate_limit]
-    # Important: use yt-dlp itself as a second public-discovery parser.
-    # Some Douyin pages expose links to yt-dlp but hide them from plain urllib HTML.
     if len(found) < limit:
         for url in _yt_dlp_public_urls(query, candidate_limit):
             if url not in found:
