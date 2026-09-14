@@ -16,44 +16,126 @@ class MediaInfo:
     duration: float | None
     width: int | None
     height: int | None
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    pixel_format: str | None = None
 
 
 def require_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None:
-        raise MediaError("FFmpeg is required. Install FFmpeg and add it to PATH.")
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        raise MediaError("FFmpeg + ffprobe are required. Install FFmpeg and add it to PATH.")
+
+
+def _run(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError(f"FFmpeg operation timed out after {timeout}s") from exc
 
 
 def probe(path: str | Path) -> MediaInfo:
     require_ffmpeg()
     p = Path(path)
-    if not p.exists():
-        raise MediaError(f"Video not found: {p}")
-    if shutil.which("ffprobe") is None:
-        raise MediaError("ffprobe is required. Install FFmpeg and add it to PATH.")
-    cmd = [
+    if not p.exists() or p.stat().st_size < 100_000:
+        raise MediaError(f"Media file is missing or too small: {p}")
+    result = _run([
         "ffprobe", "-v", "error",
-        "-show_entries", "format=duration:stream=width,height,codec_name,codec_type,profile,pix_fmt,level",
+        "-show_entries", "format=duration:stream=index,width,height,codec_name,codec_type,profile,pix_fmt,level",
         "-of", "json", str(p),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
+    ], 30)
     if result.returncode != 0:
-        raise MediaError(result.stderr.strip() or "Unable to inspect video")
-    data = json.loads(result.stdout or "{}")
-    stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video" and s.get("width")), {})
+        raise MediaError(result.stderr.strip() or f"Unable to inspect media: {p}")
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise MediaError("ffprobe returned invalid JSON") from exc
+    streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
     duration = data.get("format", {}).get("duration")
-    return MediaInfo(float(duration) if duration else None, stream.get("width"), stream.get("height"))
+    return MediaInfo(
+        float(duration) if duration not in (None, "") else None,
+        video.get("width"), video.get("height"),
+        video.get("codec_name"), audio.get("codec_name"), video.get("pix_fmt"),
+    )
 
 
-def _validate_output(path: Path) -> None:
-    if not path.exists() or path.stat().st_size < 100_000:
-        raise MediaError(f"FFmpeg produced an invalid video file: {path}")
+def validate_video(path: str | Path, *, min_seconds: float = 0.0, require_audio: bool = False) -> MediaInfo:
     info = probe(path)
-    if not info.duration or not info.width or not info.height:
-        raise MediaError(f"FFmpeg produced an incomplete video file: {path}")
+    if not info.duration or info.duration < min_seconds:
+        raise MediaError(f"Video duration {info.duration or 0:.2f}s is below required {min_seconds:.2f}s: {path}")
+    if not info.width or not info.height or info.video_codec not in {"h264", "hevc", "vp9", "av1", "mpeg4"}:
+        raise MediaError(f"Video stream is not usable: {path}")
+    if require_audio and not info.audio_codec:
+        raise MediaError(f"Audio stream is missing: {path}")
+    return info
+
+
+def _atomic_replace(temp: Path, output: Path) -> None:
+    if not temp.exists() or temp.stat().st_size < 100_000:
+        raise MediaError(f"FFmpeg did not produce a usable output: {output}")
+    temp.replace(output)
+
+
+def _subtitle_filter(srt: Path) -> str:
+    # FFmpeg/libass accepts forward-slash paths; escape the colon used by C:\.
+    value = str(srt.resolve()).replace("\\", "/")
+    value = value.replace(":", r"\:").replace("'", r"\'")
+    return f"subtitles='{value}':force_style='FontName=Arial,FontSize=18,Outline=2,Shadow=1,MarginV=120,Alignment=2'"
+
+
+def render_final(
+    input_path: str | Path,
+    subtitle_path: str | Path,
+    voice_path: str | Path,
+    output_path: str | Path,
+) -> Path:
+    """Render the final social-ready 9:16 H.264/AAC MP4 with burned-in Vietnamese subtitles."""
+    require_ffmpeg()
+    source = Path(input_path)
+    srt = Path(subtitle_path)
+    voice = Path(voice_path)
+    output = Path(output_path)
+    if not source.exists():
+        raise MediaError(f"Source video not found: {source}")
+    if not srt.exists():
+        raise MediaError(f"Subtitle file not found: {srt}")
+    if not voice.exists() or voice.stat().st_size < 1024:
+        raise MediaError(f"Voice file not found or empty: {voice}")
+    validate_video(source, min_seconds=10.0)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp = output.with_suffix(output.suffix + ".rendering.mp4")
+    vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1," + _subtitle_filter(srt)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(source), "-i", str(voice),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-shortest", "-movflags", "+faststart", str(temp),
+    ]
+    try:
+        result = _run(cmd, 300)
+        if result.returncode != 0:
+            raise MediaError(result.stderr.strip()[-3000:] or "FFmpeg final render failed")
+        info = probe(temp)
+        if not info.duration or info.width != 1080 or info.height != 1920 or info.video_codec != "h264" or info.audio_codec != "aac" or info.pixel_format != "yuv420p":
+            raise MediaError(
+                f"Final media validation failed: {info.width}x{info.height}, "
+                f"video={info.video_codec}, audio={info.audio_codec}, pix_fmt={info.pixel_format}, duration={info.duration}"
+            )
+        _atomic_replace(temp, output)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+    return output
 
 
 def make_vertical(input_path: str | Path, output_path: str | Path) -> Path:
-    """Create a Windows-compatible 9:16 H.264 MP4 video track."""
+    """Backward-compatible video-only 9:16 renderer."""
     require_ffmpeg()
     source = Path(input_path)
     out = Path(output_path)
@@ -61,29 +143,16 @@ def make_vertical(input_path: str | Path, output_path: str | Path) -> Path:
     temp = out.with_suffix(out.suffix + ".rendering.mp4")
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
     cmd = [
-        "ffmpeg", "-y", "-i", str(source),
-        "-map", "0:v:0",
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "20",
-        "-profile:v", "main",
-        "-level:v", "4.0",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        "-movflags", "+faststart",
-        str(temp),
+        "ffmpeg", "-y", "-i", str(source), "-map", "0:v:0", "-vf", vf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(temp),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        try:
-            temp.unlink()
-        except FileNotFoundError:
-            pass
-        raise MediaError(result.stderr.strip()[-2000:] or "FFmpeg render failed")
     try:
-        _validate_output(temp)
-        temp.replace(out)
+        result = _run(cmd, 300)
+        if result.returncode != 0:
+            raise MediaError(result.stderr.strip()[-3000:] or "FFmpeg render failed")
+        validate_video(temp)
+        _atomic_replace(temp, out)
     finally:
         try:
             temp.unlink()
