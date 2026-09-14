@@ -1,115 +1,91 @@
 # OpenPilot Studio 🎬🤖
 
-> **AI Content Factory — tự động tìm trend, lấy video từ nguồn được phép, xử lý thành video tiếng Việt và chuẩn bị xuất bản.**
+> **AI Content Factory — một lệnh tự động tìm trend, lấy media được phép sử dụng, dịch tiếng Việt, tạo giọng AI, dựng video, tạo tiêu đề/hashtag và xuất bản qua API chính thức.**
 
-OpenPilot Studio is an open-source, local-first content automation layer. The automation entry point is now `openpilot auto`: trend discovery → permitted media acquisition → Whisper transcription → subtitles → vertical render → publish-ready output.
-
-## ✨ v0.4 — Automatic mode
-
-- 🔥 Automatic trend discovery through the official YouTube Data API
-- 📥 Automatic video acquisition through the permitted Pexels API
-- 🎙️ Whisper transcription via `faster-whisper`
-- 📝 SRT subtitle generation
-- 📱 9:16 / 1080×1920 social-video rendering with FFmpeg
-- 🧠 Modular AI translation/prompting architecture
-- 📤 Publisher abstraction for TikTok, YouTube Shorts, Facebook Reels and Instagram Reels
-- 🛡️ No bypassing of platform protections, CAPTCHAs or access controls
-- ⚖️ Designed for content the user owns or is authorized to reuse
-
-## Automatic mode
-
-After configuring the official API credentials, one command starts the pipeline:
+## 🚀 One-command AUTO
 
 ```bash
 openpilot auto
 ```
 
-Required environment variables:
+Pipeline:
+
+```text
+Trend → permitted video → Whisper → AI Vietnamese → subtitles → AI voice → FFmpeg → title/description/hashtags → official publisher
+```
+
+## API configuration
+
+Required:
 
 ```text
 YOUTUBE_API_KEY=your_youtube_data_api_key
 PEXELS_API_KEY=your_pexels_api_key
+OPENPILOT_API_KEY=your_openai_compatible_api_key
 ```
 
-Optional trend query:
+AI options:
 
 ```text
+OPENPILOT_MODEL=gpt-5-mini
+OPENPILOT_TTS_MODEL=gpt-4o-mini-tts
+OPENPILOT_TTS_VOICE=alloy
 OPENPILOT_TREND_QUERY=trending vietnam
 ```
 
-The current automatic stage creates a processed video and subtitle file, then stops at `ready_for_publish`. Actual publishing is intentionally kept behind official platform authentication/authorization so OpenPilot cannot accidentally upload to a user's account.
+Publishing is controlled explicitly:
 
-## Quick start
+```text
+OPENPILOT_PUBLISH=none
+```
 
-Install the core project:
+For TikTok:
+
+```text
+OPENPILOT_PUBLISH=tiktok
+TIKTOK_ACCESS_TOKEN=your_authorized_user_token
+TIKTOK_PRIVACY=SELF_ONLY
+```
+
+For YouTube:
+
+```text
+OPENPILOT_PUBLISH=youtube
+YOUTUBE_ACCESS_TOKEN=your_oauth_access_token
+YOUTUBE_PRIVACY=private
+```
+
+Use `SELF_ONLY`/`private` for the first test, then change visibility only after the official platform app and account authorization/audit requirements are satisfied.
+
+## Install
 
 ```bash
 python -m venv .venv
 # Windows
 .venv\\Scripts\\activate
-# macOS/Linux
-source .venv/bin/activate
-
 pip install -e ".[dev]"
-```
-
-For automatic video processing:
-
-```bash
 pip install -e ".[media]"
 ```
 
-Install **FFmpeg** and make sure `ffmpeg` and `ffprobe` are available in PATH.
+FFmpeg must be available in PATH.
 
-Manual processing is still available:
+## What AUTO does
 
-```bash
-openpilot video input.mp4
-```
+1. Finds a trend through the official YouTube Data API.
+2. Gets a permitted stock video through Pexels API.
+3. Transcribes speech with Whisper.
+4. Translates transcript segments into natural Vietnamese with the configured AI model.
+5. Creates Vietnamese SRT subtitles.
+6. Generates Vietnamese AI voice audio.
+7. Renders/muxes the final 9:16 video with FFmpeg.
+8. Generates title, description and hashtags with AI.
+9. If `OPENPILOT_PUBLISH` is configured, uploads through an official publisher integration.
+10. Writes `output/auto-result.json` with the run result.
 
-## Architecture
+## Official publishing
 
-```text
-                    OpenPilot Studio AUTO
-                           │
-                           ↓
-                    🔥 Trend Engine
-                           │
-                           ↓
-                📥 Permitted Acquisition
-                           │
-                           ↓
-              🎙️ Whisper → 🇻🇳 AI Language
-                           │
-                           ↓
-                📝 Subtitle + 🎬 FFmpeg
-                           │
-                           ↓
-                  🤖 AI Packaging
-                           │
-                           ↓
-                    Approval Gateway
-                           │
-                           ↓
-                   Official Publishers
-                           │
-          TikTok / YouTube / Facebook / Instagram
-```
+TikTok uses the Content Posting API and requires a registered app, user authorization and the `video.publish` scope for Direct Post. Unaudited clients are restricted to private viewing. YouTube uploads use the official YouTube Data API `videos.insert` endpoint and require OAuth authorization with a YouTube upload scope. OpenPilot does not bypass platform protections.
 
-## Project structure
+## Safety / rights
 
-```text
-src/openpilot/
-├── agent.py
-├── planner.py
-├── providers.py
-├── trends.py
-├── auto_pipeline.py   # automatic trend + permitted acquisition + processing
-├── pipeline.py        # Whisper + SRT + FFmpeg
-├── publishers.py      # official publisher abstraction
-└── cli.py             # openpilot auto / video / plan / github / test
-```
-
-## Rights & platform safety
-
-OpenPilot does not attempt to defeat watermarks, CAPTCHA, login walls, rate limits, DRM or other platform protections. Automatic acquisition should use an API or source where the user has permission to download and reuse the media. Publishing should use the platform's official API and explicit account authorization.
+Only process media that you own or are authorized to reuse. OpenPilot does not bypass watermarks, CAPTCHA, login walls, DRM, rate limits or other platform protections. Keep publishing private during testing.
