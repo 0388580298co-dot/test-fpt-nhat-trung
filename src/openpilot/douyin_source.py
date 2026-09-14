@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 from .douyin_browser import browser_media_urls, download_media
 
-DOUYIN_VIDEO_RE = re.compile(r"https?://(?:www\.)?douyin\.com/video/\d+|https?://jingxuan\.douyin\.com/m/video/\d+|https?://(?:www\.)?douyin\.com/shipin/\d+|https?://v\.douyin\.com/[A-Za-z0-9_-]+/?")
+DOUYIN_VIDEO_RE = re.compile(r"https?://(?:www\.)?douyin\.com/video/\d+|https?://jingxuan.douyin.com/m/video/\d+|https?://(?:www\.)?douyin\.com/shipin/\d+|https?://v\.douyin\.com/[A-Za-z0-9_-]+/?")
 DOUYIN_ID_RE = re.compile(r"(?:aweme_id|awemeId|itemId|item_id|video_id)[\"'=: ]+([0-9]{8,30})")
 
 PUBLIC_DOYIN_SEEDS = [
@@ -27,6 +27,38 @@ PUBLIC_DOYIN_SEEDS = [
     "https://www.douyin.com/video/7578393754101691057",
     "https://www.douyin.com/video/7389553837012487487",
 ]
+
+
+def _is_valid_video(path: Path) -> bool:
+    """Reject HTML/JSON/partial CDN chunks saved with an .mp4 extension."""
+    if not path.exists() or path.stat().st_size < 100_000:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=format_name,duration",
+                "-show_entries", "stream=codec_type,codec_name,width,height",
+                "-of", "json", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    text = result.stdout or ""
+    return '"codec_type": "video"' in text and '"duration"' in text
+
+
+def _discard_invalid_video(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _extract_urls(page: str, limit: int) -> list[str]:
@@ -186,22 +218,24 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
 
     print("[DOUYIN]   Direct public download...", flush=True)
     result = _run_ytdlp(base)
-    if result.returncode == 0 and target.exists() and target.stat().st_size > 0:
+    if result.returncode == 0 and target.exists() and _is_valid_video(target):
         return target, url
+    if target.exists():
+        print("[DOUYIN]   Direct download produced an invalid/partial MP4 -> discard", flush=True)
+        _discard_invalid_video(target)
     direct_error = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
 
-    # Optional browser-cookie fallback. Only use Chrome here when its profile
-    # actually exists; an unavailable Edge profile must never block the run.
     if not cookies and _chrome_profile_available():
         print("[DOUYIN]   Direct download failed -> trying Chrome cookies...", flush=True)
         for profile in ("Default", "Profile 1", "Profile 2"):
             browser_command = base[:-1] + ["--cookies-from-browser", f"chrome:{profile}", url]
             browser_result = _run_ytdlp(browser_command)
-            if browser_result.returncode == 0 and target.exists() and target.stat().st_size > 0:
+            if browser_result.returncode == 0 and target.exists() and _is_valid_video(target):
                 return target, url
+            if target.exists():
+                _discard_invalid_video(target)
             print(f"[DOUYIN]   Chrome {profile}: unavailable/failed", flush=True)
 
-    # Normal rendered-page fallback. No CAPTCHA solving, DRM bypass, or private API.
     print("[DOUYIN]   Trying rendered Douyin browser media...", flush=True)
     media_urls = browser_media_urls(url)
     print(f"[DOUYIN]   Browser media candidates: {len(media_urls)}", flush=True)
@@ -209,13 +243,17 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
         try:
             print(f"[DOUYIN]   Browser media {media_number}/{min(len(media_urls), 8)}...", flush=True)
             if download_media(media_url, target, url):
-                return target, url
+                if _is_valid_video(target):
+                    return target, url
+                print("[DOUYIN]   Browser media returned bytes, but ffprobe rejected the file -> discard", flush=True)
+                _discard_invalid_video(target)
         except Exception as exc:
             print(f"[DOUYIN]   Browser media failed: {exc}", flush=True)
+            _discard_invalid_video(target)
             continue
 
     if media_urls:
-        raise RuntimeError("Browser exposed media URLs, but none could be downloaded")
+        raise RuntimeError("Browser exposed media URLs, but no complete playable video could be downloaded")
     if "Extracting cookies from edge" in direct_error:
         raise RuntimeError("No browser-exposed public media URL found (Edge cookie fallback skipped)")
     lines = direct_error.splitlines()
