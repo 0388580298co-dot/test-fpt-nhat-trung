@@ -94,8 +94,6 @@ def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
                 raise RuntimeError(f"Pexels media {exc.code}: {_http_detail(exc)}") from exc
             except urllib.error.URLError as exc:
                 raise RuntimeError(f"Pexels media connection error: {exc.reason}") from exc
-            # Stock footage is allowed to be silent. Keep it and let the AI voice
-            # become the narration source instead of forcing Whisper to decode it.
             return target, link
     raise RuntimeError("Pexels API: the permitted video source returned no usable video.")
 
