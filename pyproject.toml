@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openpilot-agent"
-version = "0.6.0"
-description = "Open-source AI content automation and coding agent"
+version = "0.7.0"
+description = "OpenPilot Studio - professional Douyin AI content factory and coding agent"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -18,9 +18,12 @@ media = ["faster-whisper>=1.1"]
 local = ["pyttsx3>=2.90"]
 douyin = ["yt-dlp>=2026.8.19"]
 douyin-browser = ["playwright>=1.55"]
+all = ["faster-whisper>=1.1", "pyttsx3>=2.90", "yt-dlp>=2026.8.19", "playwright>=1.55"]
 
 [project.scripts]
 openpilot = "openpilot.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
