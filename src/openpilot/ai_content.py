@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import urllib.error
 import urllib.request
@@ -9,7 +10,8 @@ from pathlib import Path
 
 
 def _provider() -> str:
-    return os.getenv("OPENPILOT_AI_PROVIDER", "openai").strip().lower()
+    # Local AI is the reliable default for the fully local pipeline.
+    return os.getenv("OPENPILOT_AI_PROVIDER", "local").strip().lower()
 
 
 def _local_model() -> str:
@@ -32,8 +34,18 @@ def _ollama_json(prompt: str) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=300) as response:
+        with urllib.request.urlopen(req, timeout=180) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except socket.timeout as exc:
+        raise RuntimeError(
+            f"Local AI timed out after 180 seconds while using '{_local_model()}'. "
+            "Make sure Ollama is running and the model is available; a smaller model such as qwen2.5:3b is recommended."
+        ) from exc
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"Local AI timed out after 180 seconds while using '{_local_model()}'. "
+            "Make sure Ollama is running and the model is available."
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
             "Local AI is unavailable. Start Ollama and install the model "
@@ -62,6 +74,10 @@ def _openai_request(path: str, payload: dict) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=120) as response:
             return json.loads(response.read().decode())
+    except socket.timeout as exc:
+        raise RuntimeError(f"OpenAI API timed out while calling {path}.") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"OpenAI API timed out while calling {path}.") from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
         if len(detail) > 600:
@@ -168,6 +184,10 @@ def synthesize_speech(text: str, output_file: str | Path) -> Path:
     try:
         with urllib.request.urlopen(req, timeout=180) as response, target.open("wb") as stream:
             stream.write(response.read())
+    except socket.timeout as exc:
+        raise RuntimeError("OpenAI TTS timed out while generating the voice.") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("OpenAI TTS timed out while generating the voice.") from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
         if len(detail) > 600:
