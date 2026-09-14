@@ -1,0 +1,14 @@
+{
+  "source": {
+    "platform": "douyin",
+    "url": "https://example.com/creator-owned-video",
+    "rights_confirmed": true
+  },
+  "language": "vi",
+  "output": {
+    "aspect_ratio": "9:16",
+    "resolution": "1080x1920"
+  },
+  "publish": ["youtube_shorts", "tiktok", "facebook_reels", "instagram_reels"],
+  "require_approval": true
+}
