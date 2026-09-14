@@ -6,14 +6,14 @@ import re
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from .config import CONFIG
+
 MEDIA_URL_RE = re.compile(r"https?://[^\"'<>\s]+(?:\.mp4|\.m3u8|/play/|playwm)[^\"'<>\s]*", re.I)
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36"
 
 
 def _timeout_ms() -> int:
-    try:
-        return max(10_000, min(90_000, int(os.getenv("OPENPILOT_BROWSER_TIMEOUT_MS", "30000"))))
-    except ValueError:
-        return 30_000
+    return CONFIG.browser_timeout_ms
 
 
 def _chrome_executable() -> str | None:
@@ -38,102 +38,107 @@ def _browser_context(playwright):
         kwargs["executable_path"] = executable
     browser = playwright.chromium.launch(**kwargs)
     context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+        user_agent=USER_AGENT,
         locale="zh-CN",
         extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
     )
     return browser, context
 
 
-def browser_media_urls(url: str, timeout_ms: int | None = None) -> list[str]:
-    """Extract media URLs from a normal rendered public Douyin page.
+def _normalise_urls(values: list[str]) -> list[str]:
+    found: list[str] = []
+    for value in values:
+        value = html.unescape(value).replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
+        for item in MEDIA_URL_RE.findall(value):
+            item = item.rstrip("\\\"'<>),;]")
+            if item not in found:
+                found.append(item)
+    return found
 
-    Every browser operation is bounded. Avoid collecting the entire Douyin HTML,
-    because very large pages can make the old implementation appear frozen.
+
+def _prepare_page(page, url: str, limit: int) -> None:
+    page.set_default_timeout(min(limit, 12_000))
+    page.set_default_navigation_timeout(limit)
+    print(f"[DOUYIN-BROWSER]   opening page (timeout={limit / 1000:.0f}s)...", flush=True)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=limit)
+    except Exception as exc:
+        print(f"[DOUYIN-BROWSER]   page open stopped: {exc}", flush=True)
+    page.wait_for_timeout(CONFIG.browser_settle_ms)
+    try:
+        page.locator("video").first.evaluate("""v => { v.muted = true; const p = v.play(); if (p) p.catch(() => {}); }""")
+    except Exception:
+        pass
+    page.wait_for_timeout(CONFIG.browser_settle_ms)
+
+
+def browser_download_video(url: str, output: Path, timeout_ms: int | None = None) -> bool:
+    """Capture a real video/mp4 response from a normally rendered public page.
+
+    This avoids the fragile pattern of extracting a signed CDN URL and then
+    opening it in a new session. Every browser operation is bounded and the
+    response is accepted only when it is actual video bytes.
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[DOUYIN-BROWSER] Playwright is not installed", flush=True)
-        return []
+        return False
 
     limit = timeout_ms or _timeout_ms()
-    captured: list[str] = []
-    values: list[str] = []
-    browser = None
-    context = None
+    output.parent.mkdir(parents=True, exist_ok=True)
+    captured: list[tuple[str, str, int]] = []
+    browser = context = page = None
     try:
         with sync_playwright() as playwright:
             browser, context = _browser_context(playwright)
             page = context.new_page()
-            page.set_default_timeout(min(limit, 15_000))
-            page.set_default_navigation_timeout(limit)
 
             def on_response(response) -> None:
                 try:
-                    value = response.url
-                    content_type = (response.headers.get("content-type") or "").lower()
-                    if ("video/" in content_type or "mpegurl" in content_type
-                            or ".mp4" in value.lower() or ".m3u8" in value.lower()
-                            or "/play/" in value.lower() or "playwm" in value.lower()):
-                        if value not in captured:
-                            captured.append(value)
+                    ctype = (response.headers.get("content-type") or "").lower()
+                    value = response.url.lower()
+                    if "video/mp4" in ctype or ("video/" in ctype and ".m3u8" not in value):
+                        length = int(response.headers.get("content-length", "0") or 0)
+                        captured.append((response.url, ctype, length))
                 except Exception:
                     pass
 
             page.on("response", on_response)
-            print(f"[DOUYIN-BROWSER]   opening page (timeout={limit / 1000:.0f}s)...", flush=True)
+            _prepare_page(page, url, limit)
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=limit)
-            except Exception as exc:
-                print(f"[DOUYIN-BROWSER]   page open stopped: {exc}", flush=True)
-
-            page.wait_for_timeout(5_000)
-            try:
-                page.locator("video").first.evaluate("""v => { v.muted = true; const p = v.play(); if (p) p.catch(() => {}); }""")
+                page.mouse.wheel(0, 700)
             except Exception:
                 pass
-            page.wait_for_timeout(4_000)
-            try:
-                page.mouse.wheel(0, 900)
-            except Exception:
-                pass
-            page.wait_for_timeout(2_000)
+            page.wait_for_timeout(1_000)
 
-            # Only inspect media-related DOM/resource URLs. Never serialize the
-            # whole document HTML.
-            try:
-                values = page.evaluate("""
-                    () => {
-                        const out = [];
-                        const add = (v) => { if (v && typeof v === 'string' && v.length < 100000) out.push(v); };
-                        document.querySelectorAll('video').forEach(v => {
-                            add(v.currentSrc); add(v.src);
-                            v.querySelectorAll('source').forEach(s => add(s.src));
-                        });
-                        document.querySelectorAll('[src], [data-src], [data-url], [href]').forEach(el => {
-                            for (const key of ['src', 'data-src', 'data-url', 'href']) {
-                                const value = el.getAttribute(key);
-                                if (value && (value.includes('.mp4') || value.includes('.m3u8') || value.includes('playwm') || value.includes('/play/'))) add(value);
-                            }
-                        });
-                        for (const entry of performance.getEntriesByType('resource')) {
-                            if (entry.name && (entry.name.includes('.mp4') || entry.name.includes('.m3u8') || entry.name.includes('playwm') || entry.name.includes('/play/'))) add(entry.name);
-                        }
-                        return out;
-                    }
-                """)
-            except Exception as exc:
-                print(f"[DOUYIN-BROWSER]   media DOM scan skipped: {exc}", flush=True)
-
-            try:
-                context.close()
-            finally:
-                context = None
-                browser.close()
-                browser = None
+            # Prefer the largest captured MP4. Very small responses are usually
+            # posters/thumbnails rather than the actual video.
+            candidates = sorted(captured, key=lambda item: item[2], reverse=True)
+            print(f"[DOUYIN-BROWSER]   captured video responses: {len(candidates)}", flush=True)
+            for media_url, content_type, content_length in candidates[:CONFIG.max_browser_media]:
+                if content_length and content_length < 100_000:
+                    continue
+                try:
+                    response = context.request.get(media_url, headers={"Referer": url, "Origin": "https://www.douyin.com", "User-Agent": USER_AGENT, "Accept": "video/mp4,*/*"}, timeout=20_000)
+                    status = int(response.status)
+                    headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+                    actual_type = headers.get("content-type", content_type)
+                    body = response.body()
+                    response.dispose()
+                    print(f"[DOUYIN-BROWSER]   media response: HTTP {status} | type={actual_type} | bytes={len(body)}", flush=True)
+                    if status == 200 and len(body) >= 100_000 and "video/" in actual_type and "mpegurl" not in actual_type:
+                        temp = output.with_suffix(output.suffix + ".browser.tmp")
+                        temp.write_bytes(body)
+                        temp.replace(output)
+                        return True
+                except Exception as exc:
+                    print(f"[DOUYIN-BROWSER]   captured media request failed: {exc}", flush=True)
+            return False
     except Exception as exc:
         print(f"[DOUYIN-BROWSER] Browser error (bounded): {exc}", flush=True)
+        return False
+    finally:
         try:
             if context:
                 context.close()
@@ -144,106 +149,83 @@ def browser_media_urls(url: str, timeout_ms: int | None = None) -> list[str]:
                 browser.close()
         except Exception:
             pass
-        return []
-
-    found: list[str] = []
-    for value in list(captured) + list(values):
-        value = html.unescape(value).replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
-        for item in MEDIA_URL_RE.findall(value):
-            item = item.rstrip("\\\"'<>),;]")
-            if item not in found:
-                found.append(item)
-    return found
 
 
-def _download_browser_full_or_ranges(context, media_url: str, output: Path, referer: str, user_agent: str) -> bool:
-    common_headers = {
-        "Referer": referer,
-        "Origin": "https://www.douyin.com",
-        "User-Agent": user_agent,
-        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
-    }
-    response = context.request.get(media_url, headers=common_headers, timeout=30_000)
-    status = int(response.status)
-    headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
-    content_type = headers.get("content-type", "").lower()
-    content_range = headers.get("content-range", "")
-    content_length = headers.get("content-length", "")
-    print(f"[DOUYIN-BROWSER]   browser request: HTTP {status} | type={content_type or '?'} | length={content_length or '?'} | range={content_range or '-'}", flush=True)
-
-    if "text/html" in content_type or "application/json" in content_type or "mpegurl" in content_type:
-        response.dispose()
-        return False
-    if status == 200 and not content_range:
-        body = response.body()
-        response.dispose()
-        if len(body) >= 100_000:
-            output.write_bytes(body)
-            return True
-        return False
-    if status != 206 or not content_range:
-        response.dispose()
-        return False
-
-    match = re.match(r"bytes\s+(\d+)-(\d+)/(\d+)", content_range)
-    if not match:
-        response.dispose()
-        return False
-    start, end, total = map(int, match.groups())
-    first = response.body()
-    response.dispose()
-    if start != 0 or end < start or total <= end or len(first) != end - start + 1:
-        return False
-
-    temp = output.with_suffix(output.suffix + ".partial")
+def browser_media_urls(url: str, timeout_ms: int | None = None) -> list[str]:
+    """Extract media URLs from a normally rendered public Douyin page."""
     try:
-        with temp.open("wb") as handle:
-            handle.write(first)
-            offset = end + 1
-            chunk_size = 2 * 1024 * 1024
-            while offset < total:
-                chunk_end = min(total - 1, offset + chunk_size - 1)
-                part = context.request.get(media_url, headers={**common_headers, "Range": f"bytes={offset}-{chunk_end}"}, timeout=30_000)
-                part_status = int(part.status)
-                part_headers = {str(k).lower(): str(v) for k, v in part.headers.items()}
-                part_range = part_headers.get("content-range", "")
-                body = part.body()
-                part.dispose()
-                expected = chunk_end - offset + 1
-                if part_status != 206 or len(body) != expected or not re.match(rf"bytes\s+{offset}-{chunk_end}/", part_range):
-                    print(f"[DOUYIN-BROWSER]   range download stopped at {offset}/{total}: HTTP {part_status} range={part_range or '-'} bytes={len(body)} expected={expected}", flush=True)
-                    return False
-                handle.write(body)
-                offset = chunk_end + 1
-        if temp.stat().st_size != total or total < 100_000:
-            return False
-        temp.replace(output)
-        return True
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[DOUYIN-BROWSER] Playwright is not installed", flush=True)
+        return []
+    limit = timeout_ms or _timeout_ms()
+    captured: list[str] = []
+    values: list[str] = []
+    browser = context = None
+    try:
+        with sync_playwright() as playwright:
+            browser, context = _browser_context(playwright)
+            page = context.new_page()
+
+            def on_response(response) -> None:
+                try:
+                    ctype = (response.headers.get("content-type") or "").lower()
+                    value = response.url
+                    if "video/" in ctype or ".mp4" in value.lower() or ".m3u8" in value.lower() or "/play/" in value.lower() or "playwm" in value.lower():
+                        if value not in captured:
+                            captured.append(value)
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+            _prepare_page(page, url, limit)
+            try:
+                values = page.evaluate("""
+                    () => {
+                        const out = [];
+                        const add = (v) => { if (v && typeof v === 'string' && v.length < 100000) out.push(v); };
+                        document.querySelectorAll('video').forEach(v => {
+                            add(v.currentSrc); add(v.src);
+                            v.querySelectorAll('source').forEach(s => add(s.src));
+                        });
+                        for (const entry of performance.getEntriesByType('resource')) {
+                            if (entry.name && (entry.name.includes('.mp4') || entry.name.includes('.m3u8') || entry.name.includes('playwm') || entry.name.includes('/play/'))) add(entry.name);
+                        }
+                        return out;
+                    }
+                """)
+            except Exception as exc:
+                print(f"[DOUYIN-BROWSER]   media DOM scan skipped: {exc}", flush=True)
+    except Exception as exc:
+        print(f"[DOUYIN-BROWSER] Browser error (bounded): {exc}", flush=True)
     finally:
         try:
-            temp.unlink()
-        except FileNotFoundError:
+            if context:
+                context.close()
+        except Exception:
             pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+    return _normalise_urls(captured + values)
 
 
 def download_media(media_url: str, output: Path, referer: str) -> bool:
-    """Download complete public media and reject partial/HTML responses."""
+    """Download complete public media; reject HTML, playlists and partial data."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36"
-
     request = Request(media_url, headers={
-        "User-Agent": user_agent,
-        "Referer": referer,
-        "Origin": "https://www.douyin.com",
+        "User-Agent": USER_AGENT, "Referer": referer, "Origin": "https://www.douyin.com",
         "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
     })
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=CONFIG.download_timeout_s) as response:
             status = getattr(response, "status", response.getcode())
             content_type = (response.headers.get("Content-Type") or "").lower()
             content_range = response.headers.get("Content-Range") or ""
             print(f"[DOUYIN-BROWSER]   direct media: HTTP {status} | type={content_type or '?'} | range={content_range or '-'}", flush=True)
-            if status == 200 and not content_range and "text/html" not in content_type and "application/json" not in content_type and "mpegurl" not in content_type:
+            if status == 200 and not content_range and "video/" in content_type and "mpegurl" not in content_type:
                 with output.open("wb") as handle:
                     while True:
                         chunk = response.read(1024 * 1024)
@@ -254,53 +236,6 @@ def download_media(media_url: str, output: Path, referer: str) -> bool:
                     return True
     except Exception as exc:
         print(f"[DOUYIN-BROWSER]   direct media failed: {exc}", flush=True)
-    try:
-        output.unlink()
-    except FileNotFoundError:
-        pass
-
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return False
-
-    browser = None
-    context = None
-    try:
-        with sync_playwright() as playwright:
-            browser, context = _browser_context(playwright)
-            page = context.new_page()
-            page.set_default_timeout(15_000)
-            page.set_default_navigation_timeout(_timeout_ms())
-            try:
-                page.goto(referer, wait_until="domcontentloaded", timeout=_timeout_ms())
-            except Exception as exc:
-                print(f"[DOUYIN-BROWSER]   media page open stopped: {exc}", flush=True)
-            page.wait_for_timeout(5_000)
-            try:
-                page.locator("video").first.evaluate("""v => { v.muted = true; const p = v.play(); if (p) p.catch(() => {}); }""")
-            except Exception:
-                pass
-            page.wait_for_timeout(3_000)
-            ok = _download_browser_full_or_ranges(context, media_url, output, referer, user_agent)
-            context.close()
-            context = None
-            browser.close()
-            browser = None
-            if ok:
-                return True
-    except Exception as exc:
-        print(f"[DOUYIN-BROWSER] Browser-session download failed: {exc}", flush=True)
-        try:
-            if context:
-                context.close()
-        except Exception:
-            pass
-        try:
-            if browser:
-                browser.close()
-        except Exception:
-            pass
     try:
         output.unlink()
     except FileNotFoundError:
