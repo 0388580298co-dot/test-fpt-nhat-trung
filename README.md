@@ -1,22 +1,43 @@
 # OpenPilot Studio 🎬🤖
 
-> **AI Content Factory — biến video bạn có quyền sử dụng thành nội dung tiếng Việt sẵn sàng cho mạng xã hội.**
+> **AI Content Factory — tự động tìm trend, lấy video từ nguồn được phép, xử lý thành video tiếng Việt và chuẩn bị xuất bản.**
 
-OpenPilot Studio is an open-source, local-first content automation layer built on top of the OpenPilot agent. The project is designed around a safe pipeline:
+OpenPilot Studio is an open-source, local-first content automation layer. The automation entry point is now `openpilot auto`: trend discovery → permitted media acquisition → Whisper transcription → subtitles → vertical render → publish-ready output.
 
-**source → speech-to-text → translation → subtitles → vertical render → approval → publishing**
+## ✨ v0.4 — Automatic mode
 
-## ✨ v0.3 — Content Factory foundation
-
-- 🎙️ Optional Whisper transcription via `faster-whisper`
-- 🇻🇳 Translation abstraction ready for LLM providers
+- 🔥 Automatic trend discovery through the official YouTube Data API
+- 📥 Automatic video acquisition through the permitted Pexels API
+- 🎙️ Whisper transcription via `faster-whisper`
 - 📝 SRT subtitle generation
 - 📱 9:16 / 1080×1920 social-video rendering with FFmpeg
-- 🔥 Trend-source abstraction for TikTok/Douyin and other sources
+- 🧠 Modular AI translation/prompting architecture
 - 📤 Publisher abstraction for TikTok, YouTube Shorts, Facebook Reels and Instagram Reels
-- 🛡️ Dry-run publishing by default
-- ⚖️ Rights-confirmation workflow: only process content you own or are authorized to reuse
-- 🧩 Modular architecture for future AI voice, scoring and official API integrations
+- 🛡️ No bypassing of platform protections, CAPTCHAs or access controls
+- ⚖️ Designed for content the user owns or is authorized to reuse
+
+## Automatic mode
+
+After configuring the official API credentials, one command starts the pipeline:
+
+```bash
+openpilot auto
+```
+
+Required environment variables:
+
+```text
+YOUTUBE_API_KEY=your_youtube_data_api_key
+PEXELS_API_KEY=your_pexels_api_key
+```
+
+Optional trend query:
+
+```text
+OPENPILOT_TREND_QUERY=trending vietnam
+```
+
+The current automatic stage creates a processed video and subtitle file, then stops at `ready_for_publish`. Actual publishing is intentionally kept behind official platform authentication/authorization so OpenPilot cannot accidentally upload to a user's account.
 
 ## Quick start
 
@@ -32,7 +53,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-For video transcription:
+For automatic video processing:
 
 ```bash
 pip install -e ".[media]"
@@ -40,81 +61,55 @@ pip install -e ".[media]"
 
 Install **FFmpeg** and make sure `ffmpeg` and `ffprobe` are available in PATH.
 
-Process a video you are authorized to use:
+Manual processing is still available:
 
-```python
-from openpilot.pipeline import process_video
-
-result = process_video("input.mp4", "output")
-print(result.output_video)
-print(result.subtitle_file)
+```bash
+openpilot video input.mp4
 ```
 
 ## Architecture
 
 ```text
-                    OpenPilot Studio
+                    OpenPilot Studio AUTO
                            │
-       ┌───────────────────┼───────────────────┐
-       ↓                   ↓                   ↓
-   Trend Engine       AI Language         Video Engine
-       │                   │                   │
-   TikTok/Douyin       STT + LLM            FFmpeg
-   adapters            Translation          Subtitle
-       │                   │                   │
-       └───────────────────┼───────────────────┘
+                           ↓
+                    🔥 Trend Engine
+                           │
+                           ↓
+                📥 Permitted Acquisition
+                           │
+                           ↓
+              🎙️ Whisper → 🇻🇳 AI Language
+                           │
+                           ↓
+                📝 Subtitle + 🎬 FFmpeg
+                           │
+                           ↓
+                  🤖 AI Packaging
+                           │
                            ↓
                     Approval Gateway
+                           │
                            ↓
-                    Publishing Engine
-                           ↓
-        TikTok / YouTube / Facebook / Instagram
+                   Official Publishers
+                           │
+          TikTok / YouTube / Facebook / Instagram
 ```
 
 ## Project structure
 
 ```text
 src/openpilot/
-├── agent.py          # coding-agent orchestration
-├── planner.py        # deterministic planning
-├── providers.py      # OpenAI-compatible LLM provider
-├── trends.py         # trend-source abstraction
-├── transcription.py  # optional Whisper STT
-├── translation.py    # translation interface
-├── subtitles.py      # SRT generation
-├── media.py          # FFmpeg media utilities
-├── pipeline.py       # video processing pipeline
-├── publishers.py     # safe publishing abstraction
-├── github_tool.py    # read-only GitHub inspection
-├── test_runner.py    # safe pytest runner
-└── cli.py            # command-line interface
+├── agent.py
+├── planner.py
+├── providers.py
+├── trends.py
+├── auto_pipeline.py   # automatic trend + permitted acquisition + processing
+├── pipeline.py        # Whisper + SRT + FFmpeg
+├── publishers.py      # official publisher abstraction
+└── cli.py             # openpilot auto / video / plan / github / test
 ```
 
-## Important safety & platform policy
+## Rights & platform safety
 
-OpenPilot Studio does **not** bypass platform protections, private content, login walls, DRM, or anti-bot systems. Trend discovery is implemented as an adapter so official APIs, licensed feeds, or user-provided sources can be connected later.
-
-Publishing is **dry-run by default**. Production integrations should use official platform APIs and explicit user authorization. The project is intended for content the user owns or has permission to reuse; automation does not grant copyright permission.
-
-## Roadmap
-
-- [x] v0.3 media pipeline foundation
-- [x] Whisper transcription adapter
-- [x] SRT subtitle generation
-- [x] 9:16 social render
-- [x] trend/publisher interfaces
-- [ ] LLM Vietnamese translation adapter
-- [ ] AI Vietnamese voice/TTS adapter
-- [ ] automatic subtitle burn-in
-- [ ] trend scoring (views, velocity, engagement)
-- [ ] official TikTok publishing adapter
-- [ ] YouTube Shorts publishing adapter
-- [ ] Meta Reels publishing adapter
-- [ ] web dashboard
-- [ ] job queue + scheduler
-- [ ] Docker sandbox
-- [ ] analytics and A/B testing
-
-## License
-
-MIT License.
+OpenPilot does not attempt to defeat watermarks, CAPTCHA, login walls, rate limits, DRM or other platform protections. Automatic acquisition should use an API or source where the user has permission to download and reuse the media. Publishing should use the platform's official API and explicit account authorization.
