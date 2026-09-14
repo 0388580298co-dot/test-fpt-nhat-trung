@@ -89,33 +89,71 @@ def _has_audio(path: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _download(url: str, target: Path, source_name: str) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "OpenPilot-Studio/0.6"})
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as stream:
+            stream.write(response.read())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"{source_name} media {exc.code}: {_http_detail(exc)}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"{source_name} media connection error: {exc.reason}") from exc
+    return target
+
+
+def _acquire_commons_video(query: str, output_dir: Path) -> tuple[Path, str]:
+    """Use Wikimedia Commons' public API for freely licensed media; no API key."""
+    terms = [query, "nature landscape", "city street"]
+    for term in terms:
+        params = urllib.parse.urlencode({
+            "action": "query",
+            "generator": "search",
+            "gsrsearch": f"{term} filetype:video",
+            "gsrnamespace": "6",
+            "gsrlimit": "10",
+            "prop": "imageinfo",
+            "iiprop": "url|mime",
+            "format": "json",
+        })
+        data = _get_json(
+            f"https://commons.wikimedia.org/w/api.php?{params}",
+            headers={"User-Agent": "OpenPilot-Studio/0.6 (local automation)"},
+            api_name="Wikimedia Commons API",
+        )
+        pages = data.get("query", {}).get("pages", {}).values()
+        for page in pages:
+            info = (page.get("imageinfo") or [{}])[0]
+            url = info.get("url")
+            mime = str(info.get("mime", "")).lower()
+            if not url or not (mime.startswith("video/") or url.lower().split("?")[0].endswith((".mp4", ".webm", ".ogv"))):
+                continue
+            suffix = ".mp4" if "mp4" in mime or url.lower().endswith(".mp4") else ".webm"
+            target = output_dir / f"commons-{page.get('pageid', 'video')}{suffix}"
+            try:
+                return _download(url, target, "Wikimedia Commons"), url
+            except RuntimeError:
+                continue
+    raise RuntimeError("No usable freely licensed video was found on Wikimedia Commons.")
+
+
 def acquire_video(query: str, output_dir: Path) -> tuple[Path, str]:
     key = os.getenv("PEXELS_API_KEY")
-    if not key:
-        raise RuntimeError("Missing PEXELS_API_KEY. Configure a permitted video source before auto mode.")
-    params = urllib.parse.urlencode({"query": query, "per_page": "10", "orientation": "portrait"})
-    data = _get_json(
-        f"https://api.pexels.com/videos/search?{params}",
-        headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.5"},
-        api_name="Pexels API",
-    )
-    for item in data.get("videos", []):
-        for file_info in item.get("video_files", []):
-            link = file_info.get("link")
-            if not link or file_info.get("width", 0) < 720:
-                continue
-            output_dir.mkdir(parents=True, exist_ok=True)
-            target = output_dir / f"source-{item['id']}.mp4"
-            request = urllib.request.Request(link, headers={"User-Agent": "OpenPilot-Studio/0.5"})
-            try:
-                with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as stream:
-                    stream.write(response.read())
-            except urllib.error.HTTPError as exc:
-                raise RuntimeError(f"Pexels media {exc.code}: {_http_detail(exc)}") from exc
-            except urllib.error.URLError as exc:
-                raise RuntimeError(f"Pexels media connection error: {exc.reason}") from exc
-            return target, link
-    raise RuntimeError("Pexels API: the permitted video source returned no usable video.")
+    if key:
+        params = urllib.parse.urlencode({"query": query, "per_page": "10", "orientation": "portrait"})
+        data = _get_json(
+            f"https://api.pexels.com/videos/search?{params}",
+            headers={"Authorization": key, "User-Agent": "OpenPilot-Studio/0.5"},
+            api_name="Pexels API",
+        )
+        for item in data.get("videos", []):
+            for file_info in item.get("video_files", []):
+                link = file_info.get("link")
+                if not link or file_info.get("width", 0) < 720:
+                    continue
+                target = output_dir / f"source-{item['id']}.mp4"
+                return _download(link, target, "Pexels"), link
+    return _acquire_commons_video(query, output_dir)
 
 
 def _segments_from_script(text: str, duration: float | None) -> list[TranscriptSegment]:
