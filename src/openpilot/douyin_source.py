@@ -158,12 +158,10 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
 def _chrome_profile_available() -> bool:
     local = os.getenv("LOCALAPPDATA", "")
     appdata = os.getenv("APPDATA", "")
-    candidates = [
-        Path(local) / "Google" / "Chrome" / "User Data",
-        Path(appdata) / "Google" / "Chrome" / "User Data",
-        Path(local) / "Microsoft" / "Edge" / "User Data",
-    ]
-    return any(path.is_dir() for path in candidates)
+    return any((Path(p) / "User Data").is_dir() for p in (
+        Path(local) / "Google" / "Chrome",
+        Path(appdata) / "Google" / "Chrome",
+    ))
 
 
 def _run_ytdlp(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -186,47 +184,54 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
         base.extend(["--cookies", str(cookie_path)])
     base.append(url)
 
+    print("[DOUYIN]   Direct public download...", flush=True)
     result = _run_ytdlp(base)
     if result.returncode == 0 and target.exists() and target.stat().st_size > 0:
         return target, url
+    direct_error = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
 
-    error_text = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
-
-    # Douyin now frequently rejects a clean yt-dlp session with "Fresh cookies".
-    # If Chrome/Edge has a normal local profile, let yt-dlp read that browser's
-    # current cookies. This is ordinary authenticated/public-browser access;
-    # it does not bypass CAPTCHA, DRM, or other access controls.
+    # Optional browser-cookie fallback. Only use Chrome here when its profile
+    # actually exists; an unavailable Edge profile must never block the run.
     if not cookies and _chrome_profile_available():
-        for browser in ("chrome", "edge"):
-            browser_command = base[:-1] + ["--cookies-from-browser", browser, url]
+        print("[DOUYIN]   Direct download failed -> trying Chrome cookies...", flush=True)
+        for profile in ("Default", "Profile 1", "Profile 2"):
+            browser_command = base[:-1] + ["--cookies-from-browser", f"chrome:{profile}", url]
             browser_result = _run_ytdlp(browser_command)
             if browser_result.returncode == 0 and target.exists() and target.stat().st_size > 0:
                 return target, url
-            error_text = ((browser_result.stderr or "") + "\n" + (browser_result.stdout or "")).strip() or error_text
+            print(f"[DOUYIN]   Chrome {profile}: unavailable/failed", flush=True)
 
-    # Last normal-public-page fallback: render the page in Chromium and read
-    # media URLs exposed to the page. No challenge solving or private API use.
+    # Normal rendered-page fallback. No CAPTCHA solving, DRM bypass, or private API.
+    print("[DOUYIN]   Trying rendered Douyin browser media...", flush=True)
     media_urls = browser_media_urls(url)
-    for media_url in media_urls[:8]:
+    print(f"[DOUYIN]   Browser media candidates: {len(media_urls)}", flush=True)
+    for media_number, media_url in enumerate(media_urls[:8], 1):
         try:
+            print(f"[DOUYIN]   Browser media {media_number}/{min(len(media_urls), 8)}...", flush=True)
             if download_media(media_url, target, url):
                 return target, url
-        except Exception:
+        except Exception as exc:
+            print(f"[DOUYIN]   Browser media failed: {exc}", flush=True)
             continue
 
-    lines = error_text.splitlines()
-    detail = lines[-1] if lines else "unknown error"
-    raise RuntimeError("Douyin download failed: " + detail)
+    if media_urls:
+        raise RuntimeError("Browser exposed media URLs, but none could be downloaded")
+    if "Extracting cookies from edge" in direct_error:
+        raise RuntimeError("No browser-exposed public media URL found (Edge cookie fallback skipped)")
+    lines = direct_error.splitlines()
+    detail = lines[-1] if lines else "no public media URL available"
+    raise RuntimeError("No browser-exposed public media URL found; yt-dlp: " + detail)
 
 
 def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
     requested = max(1, int(limit))
+    print(f"[DOUYIN] Search query: {query}", flush=True)
     urls = _search_urls(query, limit=requested)
     if not urls:
         raise RuntimeError(f"No public Douyin video URLs were discovered for '{query}'.")
     successes: list[tuple[Path, str]] = []
     errors: list[str] = []
-    print(f"[DOUYIN] Candidates: {len(urls)} | Target: {requested}", flush=True)
+    print(f"[DOUYIN] Candidates found: {len(urls)} | Target: {requested}", flush=True)
     for index, url in enumerate(urls, 1):
         if len(successes) >= requested:
             break
@@ -234,10 +239,11 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
         try:
             item = _download_public_url(url, output_dir, len(successes) + 1)
             successes.append(item)
-            print(f"[DOUYIN]   OK  {item[0].name}", flush=True)
+            print(f"[DOUYIN]   OK  {item[0].name} | total={len(successes)}/{requested}", flush=True)
         except Exception as exc:
             errors.append(str(exc))
             print(f"[DOUYIN]   SKIP {exc}", flush=True)
+    print(f"[DOUYIN] Result: {len(successes)}/{requested} downloaded", flush=True)
     if not successes:
         detail = errors[-1] if errors else "all discovered URLs were inaccessible"
         raise RuntimeError(f"No accessible public Douyin video found for '{query}'. {detail}")
