@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openpilot-agent"
-version = "0.5.0"
+version = "0.6.0"
 description = "Open-source AI content automation and coding agent"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 media = ["faster-whisper>=1.1"]
+local = ["pyttsx3>=2.90"]
 
 [project.scripts]
 openpilot = "openpilot.cli:main"
