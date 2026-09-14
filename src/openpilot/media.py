@@ -74,8 +74,43 @@ def _subtitle_filter(srt: Path) -> str:
     return f"subtitles='{value}':force_style='FontName=Arial,FontSize=18,Outline=2,Shadow=1,MarginV=120,Alignment=2'"
 
 
+def _atempo_chain(factor: float) -> str:
+    # FFmpeg's atempo accepts 0.5-2.0. Split extreme values into safe stages.
+    factor = max(0.5, min(2.0, factor))
+    return ",".join([f"atempo={factor:.6f}"])
+
+
+def fit_audio_to_duration(voice_path: str | Path, target_seconds: float) -> Path:
+    """Gently time-stretch/compress narration so speech spans the video instead of ending early."""
+    require_ffmpeg()
+    voice = Path(voice_path)
+    if not voice.exists() or voice.stat().st_size < 1024:
+        raise MediaError(f"Voice file not found or empty: {voice}")
+    target = max(1.0, float(target_seconds))
+    info = probe(voice)
+    if not info.duration or info.duration <= 0:
+        raise MediaError(f"Unable to determine narration duration: {voice}")
+    ratio = info.duration / target
+    # Keep the delivery natural. The AI script is already targeted to the video,
+    # so only a moderate correction should normally be necessary.
+    if 0.88 <= ratio <= 1.12:
+        return voice
+    adjusted = voice.with_suffix(voice.suffix + ".fit.m4a")
+    adjusted.unlink(missing_ok=True)
+    factor = max(0.70, min(1.35, ratio))
+    cmd = [
+        "ffmpeg", "-y", "-i", str(voice), "-vn", "-af", _atempo_chain(factor),
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", str(adjusted),
+    ]
+    result = _run(cmd, 180)
+    if result.returncode != 0 or not adjusted.exists() or adjusted.stat().st_size < 1024:
+        adjusted.unlink(missing_ok=True)
+        raise MediaError(result.stderr.strip()[-3000:] or "Unable to fit narration duration")
+    return adjusted
+
+
 def render_final(input_path: str | Path, subtitle_path: str | Path, voice_path: str | Path, output_path: str | Path) -> Path:
-    """Render a validated 1080x1920 H.264/AAC MP4 with burned-in Vietnamese subtitles."""
+    """Render a validated 1080x1920 H.264/AAC MP4 with full-video Vietnamese narration."""
     require_ffmpeg()
     source, srt, voice, output = Path(input_path), Path(subtitle_path), Path(voice_path), Path(output_path)
     if not source.exists(): raise MediaError(f"Source video not found: {source}")
@@ -85,9 +120,10 @@ def render_final(input_path: str | Path, subtitle_path: str | Path, voice_path: 
     if not source_info.duration: raise MediaError("Source duration is unavailable")
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".rendering.mp4")
+    fitted_voice = fit_audio_to_duration(voice, source_info.duration)
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1," + _subtitle_filter(srt)
     cmd = [
-        "ffmpeg", "-y", "-i", str(source), "-i", str(voice),
+        "ffmpeg", "-y", "-i", str(source), "-i", str(fitted_voice),
         "-map", "0:v:0", "-map", "1:a:0", "-vf", vf,
         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-af", "apad", "-t", f"{source_info.duration:.3f}",
@@ -102,6 +138,8 @@ def render_final(input_path: str | Path, subtitle_path: str | Path, voice_path: 
         _atomic_replace(temp, output)
     finally:
         temp.unlink(missing_ok=True)
+        if fitted_voice != voice:
+            fitted_voice.unlink(missing_ok=True)
     return output
 
 
