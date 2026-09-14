@@ -33,7 +33,7 @@ class AutoResult:
 
 
 def _progress(step: int, total: int, message: str) -> None:
-    """Print a realtime pipeline status line and flush it immediately."""
+    """Print a UTF-8-safe progress line and flush it immediately."""
     print(f"[{step}/{total}] {message}", flush=True)
 
 
@@ -200,46 +200,48 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    _progress(1, 8, "🔎 Đang tìm trend...")
+    _progress(1, 8, "Đang tìm trend...")
     trend = discover_trend()
 
-    _progress(2, 8, "🔍 Đang tìm video Douyin...")
+    _progress(2, 8, "Đang tìm video Douyin...")
     source, source_url = acquire_video(trend, out / "source")
+    _progress(3, 8, f"Đã tìm thấy video: {source.name}")
 
-    _progress(3, 8, "📹 Đã tìm thấy video, bắt đầu xử lý...")
-    if _has_audio(source):
-        _progress(4, 8, "⬇️ Video đã có sẵn, chuẩn bị xử lý...")
+    _progress(4, 8, "Đang chuẩn bị và tải/đọc video...")
+    has_audio = _has_audio(source)
+
+    if has_audio:
+        _progress(5, 8, "Đang nhận diện tiếng Trung bằng Whisper...")
         segments = transcribe(source, whisper_model)
         source_text = " ".join(s.text for s in segments)
         package = generate_package(source_text or trend)
+        _progress(6, 8, "Đang dịch tiếng Trung sang tiếng Việt...")
         translated = translate_segments([s.text for s in segments]) if segments else [str(package.get("translation", trend))]
         for seg, vi in zip(segments, translated):
             seg.vietnamese = vi
     else:
-        _progress(4, 8, "⬇️ Video không có âm thanh, tạo nội dung AI...")
+        _progress(5, 8, "Video không có âm thanh; đang tạo nội dung tiếng Việt...")
         package = generate_package(trend)
         narration = str(package.get("translation") or trend).strip()
         info = probe(source)
         segments = _segments_from_script(narration, info.duration)
         for seg in segments:
             seg.vietnamese = seg.text
+        _progress(6, 8, "Đã tạo nội dung và phụ đề tiếng Việt...")
 
-    _progress(5, 8, "🎤 Đang nhận diện tiếng Trung / chuẩn bị phụ đề...")
     subtitle = write_srt(segments, out / f"{source.stem}.vi.srt")
-
-    _progress(6, 8, "🇻🇳 Đang dịch và đóng gói nội dung tiếng Việt...")
-    vertical = make_vertical(source, out / f"{source.stem}.vertical.mp4")
     title = str(package.get("title", trend)).strip()
     hashtags = package.get("hashtags", [])
     hashtag_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
-
-    _progress(7, 8, "🗣️ Đang tạo giọng Việt...")
     narration_text = " ".join(getattr(s, "vietnamese", s.text) for s in segments).strip()
     if not narration_text:
         narration_text = str(package.get("translation") or trend).strip()
+
+    _progress(7, 8, "Đang tạo giọng Việt...")
     voice = synthesize_speech(narration_text, out / f"{source.stem}.vi.mp3")
 
-    _progress(8, 8, "🎬 Đang render 9:16...")
+    _progress(8, 8, "Đang render video 9:16...")
+    vertical = make_vertical(source, out / f"{source.stem}.vertical.mp4")
     voiced = _mux_voice(Path(vertical), voice, out / f"{source.stem}.final.mp4")
 
     publish_mode = os.getenv("OPENPILOT_PUBLISH", "none").lower()
@@ -255,5 +257,5 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
         raise RuntimeError("OPENPILOT_PUBLISH must be none, tiktok, or youtube.")
 
     (out / "auto-result.json").write_text(json.dumps({"trend": trend, "source_url": source_url, "input_video": str(source), "subtitle_file": str(subtitle), "output_video": str(voiced), "title": title, "hashtags": hashtag_text, "published": published, "status": status}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("✅ Hoàn tất!", flush=True)
+    print("[DONE] Hoàn tất!", flush=True)
     return AutoResult(trend, source_url, str(source), str(subtitle), str(voiced), status, title, hashtag_text, "Automatic AI translation, voice, packaging and render completed.", published)
