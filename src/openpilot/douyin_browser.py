@@ -12,10 +12,6 @@ MEDIA_URL_RE = re.compile(r"https?://[^\"'<>\s]+(?:\.mp4|\.m3u8|/play/|playwm)[^
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36"
 
 
-def _timeout_ms() -> int:
-    return CONFIG.browser_timeout_ms
-
-
 def _chrome_executable() -> str | None:
     candidates = [
         os.getenv("OPENPILOT_CHROME", "").strip(),
@@ -25,23 +21,16 @@ def _chrome_executable() -> str | None:
         os.getenv("PROGRAMFILES", "") + r"\Microsoft\Edge\Application\msedge.exe",
         os.getenv("PROGRAMFILES(X86)", "") + r"\Microsoft\Edge\Application\msedge.exe",
     ]
-    for value in candidates:
-        if value and Path(value).is_file():
-            return value
-    return None
+    return next((value for value in candidates if value and Path(value).is_file()), None)
 
 
 def _browser_context(playwright):
     executable = _chrome_executable()
-    kwargs = {"headless": True, "timeout": _timeout_ms()}
+    kwargs = {"headless": True, "timeout": CONFIG.browser_timeout_ms}
     if executable:
         kwargs["executable_path"] = executable
     browser = playwright.chromium.launch(**kwargs)
-    context = browser.new_context(
-        user_agent=USER_AGENT,
-        locale="zh-CN",
-        extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
-    )
+    context = browser.new_context(user_agent=USER_AGENT, locale="zh-CN", extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
     return browser, context
 
 
@@ -56,7 +45,8 @@ def _normalise_urls(values: list[str]) -> list[str]:
     return found
 
 
-def _prepare_page(page, url: str, limit: int) -> None:
+def _prepare_page(page, url: str) -> None:
+    limit = CONFIG.browser_timeout_ms
     page.set_default_timeout(min(limit, 12_000))
     page.set_default_navigation_timeout(limit)
     print(f"[DOUYIN-BROWSER]   opening page (timeout={limit / 1000:.0f}s)...", flush=True)
@@ -73,22 +63,17 @@ def _prepare_page(page, url: str, limit: int) -> None:
 
 
 def browser_download_video(url: str, output: Path, timeout_ms: int | None = None) -> bool:
-    """Capture a real video/mp4 response from a normally rendered public page.
-
-    This avoids the fragile pattern of extracting a signed CDN URL and then
-    opening it in a new session. Every browser operation is bounded and the
-    response is accepted only when it is actual video bytes.
-    """
+    """Capture complete MP4 bytes from the exact public browser response."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[DOUYIN-BROWSER] Playwright is not installed", flush=True)
         return False
 
-    limit = timeout_ms or _timeout_ms()
     output.parent.mkdir(parents=True, exist_ok=True)
-    captured: list[tuple[str, str, int]] = []
-    browser = context = page = None
+    limit = timeout_ms or CONFIG.browser_timeout_ms
+    captured = []
+    browser = context = None
     try:
         with sync_playwright() as playwright:
             browser, context = _browser_context(playwright)
@@ -97,43 +82,37 @@ def browser_download_video(url: str, output: Path, timeout_ms: int | None = None
             def on_response(response) -> None:
                 try:
                     ctype = (response.headers.get("content-type") or "").lower()
-                    value = response.url.lower()
-                    if "video/mp4" in ctype or ("video/" in ctype and ".m3u8" not in value):
+                    if "video/mp4" in ctype or ("video/" in ctype and "mpegurl" not in ctype):
                         length = int(response.headers.get("content-length", "0") or 0)
-                        captured.append((response.url, ctype, length))
+                        captured.append((response, ctype, length))
                 except Exception:
                     pass
 
             page.on("response", on_response)
-            _prepare_page(page, url, limit)
+            _prepare_page(page, url)
             try:
-                page.mouse.wheel(0, 700)
+                page.mouse.wheel(0, 800)
             except Exception:
                 pass
-            page.wait_for_timeout(1_000)
-
-            # Prefer the largest captured MP4. Very small responses are usually
-            # posters/thumbnails rather than the actual video.
+            page.wait_for_timeout(750)
             candidates = sorted(captured, key=lambda item: item[2], reverse=True)
             print(f"[DOUYIN-BROWSER]   captured video responses: {len(candidates)}", flush=True)
-            for media_url, content_type, content_length in candidates[:CONFIG.max_browser_media]:
+
+            for response, ctype, content_length in candidates[:CONFIG.max_browser_media]:
                 if content_length and content_length < 100_000:
                     continue
                 try:
-                    response = context.request.get(media_url, headers={"Referer": url, "Origin": "https://www.douyin.com", "User-Agent": USER_AGENT, "Accept": "video/mp4,*/*"}, timeout=20_000)
-                    status = int(response.status)
-                    headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
-                    actual_type = headers.get("content-type", content_type)
+                    # Read the body of the response that the browser itself
+                    # received. This preserves the signed URL/session context.
                     body = response.body()
-                    response.dispose()
-                    print(f"[DOUYIN-BROWSER]   media response: HTTP {status} | type={actual_type} | bytes={len(body)}", flush=True)
-                    if status == 200 and len(body) >= 100_000 and "video/" in actual_type and "mpegurl" not in actual_type:
+                    print(f"[DOUYIN-BROWSER]   media response: HTTP {response.status} | type={ctype} | bytes={len(body)}", flush=True)
+                    if response.status == 200 and len(body) >= 100_000:
                         temp = output.with_suffix(output.suffix + ".browser.tmp")
                         temp.write_bytes(body)
                         temp.replace(output)
                         return True
                 except Exception as exc:
-                    print(f"[DOUYIN-BROWSER]   captured media request failed: {exc}", flush=True)
+                    print(f"[DOUYIN-BROWSER]   captured response body failed: {exc}", flush=True)
             return False
     except Exception as exc:
         print(f"[DOUYIN-BROWSER] Browser error (bounded): {exc}", flush=True)
@@ -156,9 +135,8 @@ def browser_media_urls(url: str, timeout_ms: int | None = None) -> list[str]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("[DOUYIN-BROWSER] Playwright is not installed", flush=True)
         return []
-    limit = timeout_ms or _timeout_ms()
+    limit = timeout_ms or CONFIG.browser_timeout_ms
     captured: list[str] = []
     values: list[str] = []
     browser = context = None
@@ -178,24 +156,21 @@ def browser_media_urls(url: str, timeout_ms: int | None = None) -> list[str]:
                     pass
 
             page.on("response", on_response)
-            _prepare_page(page, url, limit)
+            _prepare_page(page, url)
             try:
                 values = page.evaluate("""
                     () => {
                         const out = [];
-                        const add = (v) => { if (v && typeof v === 'string' && v.length < 100000) out.push(v); };
-                        document.querySelectorAll('video').forEach(v => {
-                            add(v.currentSrc); add(v.src);
-                            v.querySelectorAll('source').forEach(s => add(s.src));
-                        });
+                        const add = v => { if (v && typeof v === 'string' && v.length < 100000) out.push(v); };
+                        document.querySelectorAll('video').forEach(v => { add(v.currentSrc); add(v.src); v.querySelectorAll('source').forEach(s => add(s.src)); });
                         for (const entry of performance.getEntriesByType('resource')) {
                             if (entry.name && (entry.name.includes('.mp4') || entry.name.includes('.m3u8') || entry.name.includes('playwm') || entry.name.includes('/play/'))) add(entry.name);
                         }
                         return out;
                     }
                 """)
-            except Exception as exc:
-                print(f"[DOUYIN-BROWSER]   media DOM scan skipped: {exc}", flush=True)
+            except Exception:
+                pass
     except Exception as exc:
         print(f"[DOUYIN-BROWSER] Browser error (bounded): {exc}", flush=True)
     finally:
@@ -213,19 +188,15 @@ def browser_media_urls(url: str, timeout_ms: int | None = None) -> list[str]:
 
 
 def download_media(media_url: str, output: Path, referer: str) -> bool:
-    """Download complete public media; reject HTML, playlists and partial data."""
+    """Download one complete public MP4 URL; never accept partial/HTML data."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    request = Request(media_url, headers={
-        "User-Agent": USER_AGENT, "Referer": referer, "Origin": "https://www.douyin.com",
-        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
-    })
+    request = Request(media_url, headers={"User-Agent": USER_AGENT, "Referer": referer, "Origin": "https://www.douyin.com", "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8"})
     try:
         with urlopen(request, timeout=CONFIG.download_timeout_s) as response:
             status = getattr(response, "status", response.getcode())
-            content_type = (response.headers.get("Content-Type") or "").lower()
-            content_range = response.headers.get("Content-Range") or ""
-            print(f"[DOUYIN-BROWSER]   direct media: HTTP {status} | type={content_type or '?'} | range={content_range or '-'}", flush=True)
-            if status == 200 and not content_range and "video/" in content_type and "mpegurl" not in content_type:
+            ctype = (response.headers.get("Content-Type") or "").lower()
+            print(f"[DOUYIN-BROWSER]   direct media: HTTP {status} | type={ctype or '?'} | range={response.headers.get('Content-Range') or '-'}", flush=True)
+            if status == 200 and "video/" in ctype and "mpegurl" not in ctype and not response.headers.get("Content-Range"):
                 with output.open("wb") as handle:
                     while True:
                         chunk = response.read(1024 * 1024)
