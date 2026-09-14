@@ -75,13 +75,23 @@ def _subtitle_filter(srt: Path) -> str:
 
 
 def _atempo_chain(factor: float) -> str:
-    # FFmpeg's atempo accepts 0.5-2.0. Split extreme values into safe stages.
-    factor = max(0.5, min(2.0, factor))
-    return ",".join([f"atempo={factor:.6f}"])
+    """Represent any positive tempo factor using FFmpeg-safe 0.5-2.0 stages."""
+    if factor <= 0:
+        raise MediaError("Invalid narration tempo factor")
+    stages: list[float] = []
+    remaining = factor
+    while remaining > 2.0:
+        stages.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        stages.append(0.5)
+        remaining /= 0.5
+    stages.append(remaining)
+    return ",".join(f"atempo={stage:.6f}" for stage in stages)
 
 
 def fit_audio_to_duration(voice_path: str | Path, target_seconds: float) -> Path:
-    """Gently time-stretch/compress narration so speech spans the video instead of ending early."""
+    """Time-align narration to the video so spoken coverage runs from start to finish."""
     require_ffmpeg()
     voice = Path(voice_path)
     if not voice.exists() or voice.stat().st_size < 1024:
@@ -91,21 +101,20 @@ def fit_audio_to_duration(voice_path: str | Path, target_seconds: float) -> Path
     if not info.duration or info.duration <= 0:
         raise MediaError(f"Unable to determine narration duration: {voice}")
     ratio = info.duration / target
-    # Keep the delivery natural. The AI script is already targeted to the video,
-    # so only a moderate correction should normally be necessary.
-    if 0.88 <= ratio <= 1.12:
-        return voice
     adjusted = voice.with_suffix(voice.suffix + ".fit.m4a")
     adjusted.unlink(missing_ok=True)
-    factor = max(0.70, min(1.35, ratio))
     cmd = [
-        "ffmpeg", "-y", "-i", str(voice), "-vn", "-af", _atempo_chain(factor),
+        "ffmpeg", "-y", "-i", str(voice), "-vn", "-af", _atempo_chain(ratio),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", str(adjusted),
     ]
     result = _run(cmd, 180)
     if result.returncode != 0 or not adjusted.exists() or adjusted.stat().st_size < 1024:
         adjusted.unlink(missing_ok=True)
         raise MediaError(result.stderr.strip()[-3000:] or "Unable to fit narration duration")
+    fitted_info = probe(adjusted)
+    if not fitted_info.duration or abs(fitted_info.duration - target) > max(0.20, target * 0.03):
+        adjusted.unlink(missing_ok=True)
+        raise MediaError(f"Narration alignment failed: {fitted_info.duration or 0:.2f}s vs {target:.2f}s")
     return adjusted
 
 
