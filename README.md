@@ -1,6 +1,6 @@
 # OpenPilot Studio 🎬🤖
 
-> **AI Content Factory — một lệnh tự động tìm trend, tìm video công khai, tải nhiều video, nhận diện lời thoại, dịch tiếng Việt, tạo giọng, dựng 9:16, tạo metadata và tùy chọn xuất bản qua API chính thức.**
+> **AI Content Factory — một lệnh tự động tìm trend, tìm và tải video Douyin, nhận diện lời thoại, dịch tiếng Việt, tạo giọng, dựng 9:16, tạo metadata và tùy chọn xuất bản qua API chính thức.**
 
 ## 🚀 One-command AUTO
 
@@ -8,25 +8,40 @@
 openpilot auto
 ```
 
-Mặc định AUTO tạo một batch **10 video**:
+Mặc định AUTO tạo một batch **10 video Douyin**:
 
 ```text
-Trend
-  ↓
-Tìm ứng viên Douyin công khai
-  ↓
-Thử tải nhiều ứng viên → lấy tối đa 10 video truy cập được
-  ↓ nếu thiếu
-Pexels (nếu có API key) / Wikimedia Commons
-  ↓
+Trend discovery
+      ↓
+Douyin search
+      ↓
+Tìm nhiều ứng viên → thử tải → lấy tối đa 10 video Douyin
+      ↓
 Whisper → AI Vietnamese → SRT → TTS → FFmpeg 9:16
-  ↓
+      ↓
 Title + description + unique hashtags
-  ↓
+      ↓
 10 sản phẩm hoàn chỉnh + auto-manifest.json
-  ↓
+      ↓
 Tùy chọn: TikTok / YouTube API chính thức
 ```
+
+**AUTO chỉ nhận video từ Douyin. Không có Pexels/Wikimedia fallback.** Nếu Douyin không đủ video truy cập được, hệ thống báo rõ số lượng thực tế thay vì lấy nguồn khác.
+
+## 🖥️ Professional terminal UI
+
+Khi chạy `openpilot auto`, CLI hiển thị:
+
+- Header OpenPilot Studio + cấu hình batch/AI/TTS/publish.
+- Từng phase của pipeline.
+- Số ứng viên Douyin và tiến độ tải.
+- Khung riêng cho từng `VIDEO 01/10`, `VIDEO 02/10`...
+- 5 stage của từng video: Whisper/AI, SRT, TTS, FFmpeg, publishing.
+- Thời gian thực hiện từng stage và tổng thời gian.
+- Đường dẫn video thành phẩm, title và hashtag.
+- Tổng kết `Completed / Failed / Elapsed / Manifest`.
+
+Không cần cài thêm thư viện UI.
 
 ## 🧠 AI chạy local
 
@@ -62,32 +77,28 @@ set OPENPILOT_BATCH_SIZE=10
 openpilot auto
 ```
 
-AUTO sẽ **không dừng cả batch chỉ vì một video lỗi**. Video lỗi được ghi vào manifest để kiểm tra sau.
+AUTO không dừng cả batch chỉ vì một video lỗi. Video lỗi được ghi vào manifest.
 
 ## 🎯 Output
-
-Sau khi chạy:
 
 ```text
 output/
 ├── source/
-│   ├── douyin/       # video tải được từ Douyin
-│   ├── pexels/       # fallback nếu có PEXELS_API_KEY
-│   └── commons/      # fallback Wikimedia Commons
-├── video-01-....vi.srt
-├── video-01-....vi.mp3
-├── video-01-....vertical.mp4
-├── video-01-....final.mp4
+│   └── douyin/              # CHỈ video tải từ Douyin
+├── video-01-douyin-01.vi.srt
+├── video-01-douyin-01.vi.mp3
+├── video-01-douyin-01.vertical.mp4
+├── video-01-douyin-01.final.mp4
 ├── ...
-├── video-10-....final.mp4
+├── video-10-douyin-10.final.mp4
 └── auto-manifest.json
 ```
 
-`auto-manifest.json` chứa trạng thái từng video, đường dẫn input/output, tiêu đề, hashtag, trạng thái publish và lỗi nếu có.
+`auto-manifest.json` chứa trend, chính sách nguồn `douyin_only`, số lượng yêu cầu/thực tế, đường dẫn input/output, title, hashtag, trạng thái publish và lỗi từng video.
 
-## 🌐 Nguồn video
+## 🌐 Nguồn video — Douyin only
 
-Douyin được tìm bằng trang công khai và công cụ tìm kiếm, sau đó tải bằng `yt-dlp`. Có thể cung cấp cookie của chính tài khoản người dùng bằng:
+Douyin được tìm qua trang công khai và công cụ tìm kiếm, sau đó tải bằng `yt-dlp`. Có thể cung cấp cookie của chính tài khoản người dùng bằng:
 
 ```cmd
 set OPENPILOT_DOUYIN_COOKIES=C:\path\cookies.txt
@@ -95,20 +106,12 @@ set OPENPILOT_DOUYIN_COOKIES=C:\path\cookies.txt
 
 OpenPilot không vượt CAPTCHA, DRM, anti-bot, login wall hoặc cơ chế bảo vệ truy cập.
 
-Nếu Douyin không có đủ video truy cập được, AUTO tự động bổ sung từ Pexels nếu có API key hoặc Wikimedia Commons.
-
 ## 🔑 API configuration
 
 Trend có thể dùng YouTube Data API:
 
 ```text
 YOUTUBE_API_KEY=your_youtube_data_api_key
-```
-
-Pexels là nguồn fallback tùy chọn:
-
-```text
-PEXELS_API_KEY=your_pexels_api_key
 ```
 
 Nếu dùng AI cloud thay cho local:
@@ -165,12 +168,12 @@ python -m pip install -U yt-dlp
 
 FFmpeg phải có trong PATH.
 
-## ✅ Các phần AUTO hiện có
+## ✅ AUTO hiện có
 
 1. Tìm trend tự động.
-2. Tìm nhiều ứng viên Douyin và thử tải tuần tự.
-3. Có fallback khi Douyin không đủ video.
-4. Xử lý batch tối đa 10 video.
+2. Tìm nhiều ứng viên Douyin.
+3. Chỉ tải video Douyin.
+4. Xử lý batch tối đa 50 video, mặc định 10.
 5. Whisper speech-to-text.
 6. Dịch từng đoạn sang tiếng Việt.
 7. Tạo SRT tiếng Việt.
@@ -180,7 +183,8 @@ FFmpeg phải có trong PATH.
 11. Chuẩn hóa hashtag, loại trùng lặp.
 12. Một video lỗi không làm mất cả batch.
 13. Ghi `auto-manifest.json`.
-14. TikTok/YouTube publish qua API chính thức khi được cấu hình.
+14. Giao diện CLI chi tiết theo từng phase/video.
+15. TikTok/YouTube publish qua API chính thức khi được cấu hình.
 
 ## ⚠️ Quyền sử dụng nội dung
 
