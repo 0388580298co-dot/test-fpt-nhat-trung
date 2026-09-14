@@ -12,24 +12,11 @@ DOUYIN_VIDEO_RE = re.compile(
 )
 
 
-def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
-    search = f'site:douyin.com/video "{query}"'
-    if engine == "bing":
-        url = f"https://www.bing.com/search?q={quote_plus(search)}&count={min(limit, 50)}"
-    else:
-        url = f"https://html.duckduckgo.com/html/?q={quote_plus(search)}"
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) OpenPilot-Studio/0.6"})
-    with urlopen(request, timeout=30) as response:
-        page = response.read().decode("utf-8", errors="replace")
-
+def _extract_urls(page: str, limit: int) -> list[str]:
+    page = unquote(html.unescape(page))
     found: list[str] = []
-    page = html.unescape(page)
-    # Search engines may HTML-escape query URLs or put them behind redirects.
-    candidates = DOUYIN_VIDEO_RE.findall(page)
-    if not candidates:
-        candidates = DOUYIN_VIDEO_RE.findall(unquote(page))
-    for match in candidates:
-        clean = unquote(match).rstrip(".,);\"'")
+    for match in DOUYIN_VIDEO_RE.findall(page):
+        clean = match.rstrip(".,);\"'")
         if clean not in found:
             found.append(clean)
         if len(found) >= limit:
@@ -37,22 +24,69 @@ def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
     return found
 
 
-def _search_urls(query: str, limit: int = 10) -> list[str]:
-    """Find publicly indexed Douyin video URLs using ordinary public search."""
+def _fetch(url: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
+    # Shorter keyword queries are much more likely to have indexed results than
+    # sending a long Vietnamese trend title verbatim.
+    variants = [
+        query,
+        " ".join(query.split()[:6]),
+        "热门 视频",
+    ]
     found: list[str] = []
-    errors: list[str] = []
-    for engine in ("bing", "duckduckgo"):
+    for term in variants:
+        if engine == "bing":
+            search = f"site:douyin.com/video {term}"
+            url = f"https://www.bing.com/search?q={quote_plus(search)}&count=50"
+        else:
+            search = f"site:douyin.com/video {term}"
+            url = f"https://html.duckduckgo.com/html/?q={quote_plus(search)}"
         try:
-            for url in _search_engine_urls(query, engine, limit):
-                if url not in found:
-                    found.append(url)
+            for item in _extract_urls(_fetch(url), limit):
+                if item not in found:
+                    found.append(item)
                 if len(found) >= limit:
                     return found
-        except Exception as exc:
-            errors.append(f"{engine}: {exc}")
-    if not found and errors:
-        raise RuntimeError("; ".join(errors))
+        except Exception:
+            continue
     return found
+
+
+def _search_direct_douyin(query: str, limit: int) -> list[str]:
+    """Read the normal public Douyin search page when it exposes video links."""
+    url = f"https://www.douyin.com/search/{quote_plus(query)}?type=general"
+    try:
+        return _extract_urls(_fetch(url), limit)
+    except Exception:
+        return []
+
+
+def _search_urls(query: str, limit: int = 10) -> list[str]:
+    """Find publicly exposed Douyin video URLs using ordinary public pages/search."""
+    found: list[str] = []
+
+    # Try Douyin's ordinary public search page first, then public search engines.
+    for url in _search_direct_douyin(query, limit):
+        if url not in found:
+            found.append(url)
+    for engine in ("bing", "duckduckgo"):
+        for url in _search_engine_urls(query, engine, limit):
+            if url not in found:
+                found.append(url)
+            if len(found) >= limit:
+                return found
+    return found[:limit]
 
 
 def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, str]:
@@ -75,16 +109,12 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
 
 
 def acquire_douyin(query: str, output_dir: Path, limit: int = 10) -> tuple[Path, str]:
-    """Discover several public URLs, then return the first successfully downloaded video.
+    """Discover public URLs and return the first successfully downloaded video.
 
-    This intentionally does not use login credentials, cookies, CAPTCHA workarounds,
-    DRM removal, or anti-bot bypasses. Inaccessible public results are skipped.
+    No login credentials, cookies, CAPTCHA workarounds, DRM removal, or anti-bot
+    bypasses are used. Inaccessible results are skipped.
     """
-    try:
-        urls = _search_urls(query, limit=limit)
-    except Exception as exc:
-        raise RuntimeError(f"Douyin public search failed: {exc}") from exc
-
+    urls = _search_urls(query, limit=limit)
     if not urls:
         raise RuntimeError(f"No public Douyin video URLs were indexed for '{query}'.")
 
