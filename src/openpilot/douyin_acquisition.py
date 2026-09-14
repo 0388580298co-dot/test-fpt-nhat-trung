@@ -47,7 +47,9 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
     requested = max(1, int(limit))
     output_dir.mkdir(parents=True, exist_ok=True)
     all_urls = _search_urls(query, limit=requested)
-    max_candidates = min(len(all_urls), max(requested * 3, 12))
+    # Do not spend an hour walking a long candidate list. The browser path is
+    # deliberately expensive, so each run has a hard candidate budget.
+    max_candidates = min(len(all_urls), CONFIG.max_douyin_candidates, max(requested * 3, requested))
     urls = all_urls[:max_candidates]
     print(f"[DOUYIN] Search query: {query}", flush=True)
     print(f"[DOUYIN] Candidates found: {len(urls)} | Target: {requested} | Minimum duration: >{MIN_VIDEO_SECONDS:.0f}s", flush=True)
@@ -64,9 +66,12 @@ def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[
             print("[DOUYIN]   Direct yt-dlp download...", flush=True)
             if _download_with_ytdlp(url, target):
                 duration = _video_duration(target) or 0.0
-                print(f"[DOUYIN]   OK direct | duration={duration:.1f}s", flush=True)
-                successes.append((target, url))
-                continue
+                if duration > MIN_VIDEO_SECONDS:
+                    print(f"[DOUYIN]   OK direct | duration={duration:.1f}s", flush=True)
+                    successes.append((target, url))
+                    continue
+                print(f"[DOUYIN]   Direct video too short ({duration:.1f}s <= {MIN_VIDEO_SECONDS:.0f}s) -> discard", flush=True)
+                target.unlink(missing_ok=True)
             print("[DOUYIN]   Browser capture (bounded session)...", flush=True)
             if browser_download_video(url, target, CONFIG.browser_timeout_ms):
                 duration = _video_duration(target) or 0.0
