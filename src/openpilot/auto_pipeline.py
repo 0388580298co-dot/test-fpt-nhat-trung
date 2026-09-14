@@ -121,15 +121,32 @@ def _discover_trend_from_news(query: str) -> str:
 def discover_trend() -> str:
     query = os.getenv("OPENPILOT_TREND_QUERY", "trending vietnam")
     key = os.getenv("YOUTUBE_API_KEY")
-    if not key:
-        return _discover_trend_from_news(query)
-    params = urllib.parse.urlencode({"part": "snippet", "q": query, "type": "video", "order": "date", "maxResults": "10", "key": key})
+
+    # 1) Prefer YouTube search when an API key is configured.
+    if key:
+        params = urllib.parse.urlencode({"part": "snippet", "q": query, "type": "video", "order": "date", "maxResults": "10", "key": key})
+        try:
+            data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}", api_name="YouTube API")
+            items = data.get("items", [])
+            if items:
+                title = items[0].get("snippet", {}).get("title", "").strip()
+                if title:
+                    return title
+        except RuntimeError as exc:
+            print(f"[TREND] YouTube unavailable: {exc}", flush=True)
+
+    # 2) Free RSS discovery. Network/DNS failure must not abort AUTO.
     try:
-        data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}", api_name="YouTube API")
-    except RuntimeError:
         return _discover_trend_from_news(query)
-    items = data.get("items", [])
-    return items[0].get("snippet", {}).get("title", query) if items else _discover_trend_from_news(query)
+    except RuntimeError as exc:
+        print(f"[TREND] News unavailable: {exc}", flush=True)
+
+    # 3) Deterministic local fallback. This keeps the pipeline running when
+    # the PC has no DNS/internet access to the trend provider. The actual
+    # Douyin search still runs against this topic and reports the query.
+    fallback = os.getenv("OPENPILOT_TREND_FALLBACK", "Cùng Việt Nam tiến bước")
+    print(f"[TREND] Using local fallback topic: {fallback}", flush=True)
+    return fallback
 
 
 def _has_audio(path: Path) -> bool:
