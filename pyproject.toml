@@ -16,6 +16,7 @@ dependencies = []
 dev = ["pytest>=8.0"]
 media = ["faster-whisper>=1.1"]
 local = ["pyttsx3>=2.90"]
+douyin = ["yt-dlp>=2026.8.19"]
 
 [project.scripts]
 openpilot = "openpilot.cli:main"
