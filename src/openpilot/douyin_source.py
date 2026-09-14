@@ -30,7 +30,7 @@ def _search_urls(query: str, limit: int = 10) -> list[str]:
 
 
 def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, str]:
-    """Download a public Douyin URL through yt-dlp with no cookies or authentication.
+    """Download a public Douyin URL through yt-dlp without cookies or authentication.
 
     If the site asks for cookies, CAPTCHA, login, or another access-control step,
     yt-dlp is not given a workaround; the item is simply skipped by the caller.
@@ -40,8 +40,6 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
     command = [
         "yt-dlp",
         "--no-playlist",
-        "--no-cookies",
-        "--no-check-certificates",
         "--format",
         "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format",
