@@ -1,6 +1,7 @@
 import argparse
 import json
 from .agent import as_json, run
+from .auto_pipeline import run_auto
 from .github_tool import inspect_repository
 from .pipeline import process_video
 from .providers import provider_from_env
@@ -28,6 +29,11 @@ def main():
     video.add_argument("--output-dir", default="output", help="Output directory")
     video.add_argument("--whisper-model", default="small", help="faster-whisper model, e.g. tiny, base, small")
     video.add_argument("--json", action="store_true", help="Print the result as JSON")
+
+    auto = sub.add_parser("auto", help="Automatically discover a trend, acquire permitted media and process it")
+    auto.add_argument("--output-dir", default="output", help="Output directory")
+    auto.add_argument("--whisper-model", default="small", help="faster-whisper model")
+    auto.add_argument("--json", action="store_true", help="Print the result as JSON")
 
     args = parser.parse_args()
 
@@ -77,6 +83,31 @@ def main():
             print(f"Subtitle: {result.subtitle_file}")
             print(f"Video:    {result.output_video}")
             print(f"Segments: {result.segments}")
+
+    elif args.command == "auto":
+        try:
+            result = run_auto(args.output_dir, args.whisper_model)
+        except Exception as exc:
+            parser.error(str(exc))
+        payload = {
+            "trend": result.trend,
+            "source_url": result.source_url,
+            "input_video": result.input_video,
+            "subtitle_file": result.subtitle_file,
+            "output_video": result.output_video,
+            "status": result.status,
+            "message": result.message,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("OpenPilot Studio - AUTO\n")
+            print(f"Trend:    {result.trend}")
+            print(f"Source:   {result.source_url}")
+            print(f"Video:    {result.output_video}")
+            print(f"Subtitle: {result.subtitle_file}")
+            print(f"Status:   {result.status}")
+            print(f"\n{result.message}")
 
 
 if __name__ == "__main__":
