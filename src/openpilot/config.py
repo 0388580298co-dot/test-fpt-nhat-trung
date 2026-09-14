@@ -26,6 +26,8 @@ class AutoConfig:
     browser_settle_ms: int = _int_env("OPENPILOT_BROWSER_SETTLE_MS", 2_000, 500, 10_000)
     download_timeout_s: int = _int_env("OPENPILOT_DOWNLOAD_TIMEOUT", 45, 10, 180)
     max_browser_media: int = _int_env("OPENPILOT_MAX_BROWSER_MEDIA", 5, 1, 12)
+    max_browser_media_bytes: int = _int_env("OPENPILOT_MAX_BROWSER_MEDIA_BYTES", 30_000_000, 1_000_000, 200_000_000)
+    max_douyin_candidates: int = _int_env("OPENPILOT_MAX_DOUYIN_CANDIDATES", 8, 1, 30)
     ai_timeout_s: int = _int_env("OPENPILOT_AI_TIMEOUT", 180, 30, 600)
     whisper_model: str = os.getenv("OPENPILOT_WHISPER_MODEL", "small")
 
