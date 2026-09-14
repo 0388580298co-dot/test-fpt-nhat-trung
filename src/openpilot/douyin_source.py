@@ -11,15 +11,28 @@ from urllib.request import Request, urlopen
 DOUYIN_VIDEO_RE = re.compile(
     r"https?://(?:www\.)?douyin\.com/video/\d+(?:[^\"'<>\s&]|%[0-9A-Fa-f]{2})*|https?://v\.douyin\.com/[A-Za-z0-9_-]+/?"
 )
+DOUYIN_ID_RE = re.compile(r"(?:aweme_id|awemeId|itemId|item_id|video_id)[\"'=: ]+([0-9]{8,30})")
 
 
 def _extract_urls(page: str, limit: int) -> list[str]:
+    """Extract Douyin video URLs from normal or JSON-escaped HTML."""
+    # Douyin/search engines frequently JSON-escape URLs as https:\/\/...
+    page = page.replace(r"\/", "/").replace(r"\u002F", "/").replace(r"\u002f", "/")
     page = unquote(html.unescape(page))
     found: list[str] = []
+
     for match in DOUYIN_VIDEO_RE.findall(page):
         clean = match.rstrip(".,);\"'")
         if clean not in found:
             found.append(clean)
+        if len(found) >= limit:
+            return found
+
+    # If the page contains only numeric video IDs, rebuild valid Douyin URLs.
+    for video_id in DOUYIN_ID_RE.findall(page):
+        url = f"https://www.douyin.com/video/{video_id}"
+        if url not in found:
+            found.append(url)
         if len(found) >= limit:
             break
     return found
@@ -31,16 +44,26 @@ def _fetch(url: str) -> str:
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
     with urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
+def _query_variants(query: str) -> list[str]:
+    clean = re.sub(r"\s+", " ", query).strip()
+    # Remove common publisher suffixes so the Douyin search is about the topic,
+    # not about a specific Vietnamese news publisher.
+    clean = re.sub(r"\s*[-–—|]\s*(Đài Phát thanh.*|VTV.*|Báo.*)$", "", clean, flags=re.I)
+    words = clean.split()
+    variants = [clean, " ".join(words[:10]), "抖音 热门", "热门 视频", "热点 视频"]
+    return list(dict.fromkeys(v for v in variants if v))
+
+
 def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
-    variants = [query, " ".join(query.split()[:8]), "热门 视频", "抖音 热门"]
     found: list[str] = []
-    for term in variants:
+    for term in _query_variants(query):
         search = f"site:douyin.com/video {term}"
         if engine == "bing":
             url = f"https://www.bing.com/search?q={quote_plus(search)}&count=50"
@@ -58,20 +81,28 @@ def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
 
 
 def _search_direct_douyin(query: str, limit: int) -> list[str]:
-    url = f"https://www.douyin.com/search/{quote_plus(query)}?type=general"
-    try:
-        return _extract_urls(_fetch(url), limit)
-    except Exception:
-        return []
+    found: list[str] = []
+    for term in _query_variants(query):
+        url = f"https://www.douyin.com/search/{quote_plus(term)}?type=general"
+        try:
+            for item in _extract_urls(_fetch(url), limit):
+                if item not in found:
+                    found.append(item)
+                if len(found) >= limit:
+                    return found
+        except Exception:
+            continue
+    return found
 
 
 def _search_urls(query: str, limit: int = 10) -> list[str]:
-    # Search substantially more candidates than the requested output count.
     candidate_limit = max(limit * 5, 30)
     found: list[str] = []
+
     for url in _search_direct_douyin(query, candidate_limit):
         if url not in found:
             found.append(url)
+
     for engine in ("bing", "duckduckgo"):
         for url in _search_engine_urls(query, engine, candidate_limit):
             if url not in found:
@@ -86,11 +117,9 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"douyin-{index:02d}.mp4"
     command = [
-        "yt-dlp",
-        "--no-playlist",
+        "yt-dlp", "--no-playlist",
         "--format", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-        "--merge-output-format", "mp4",
-        "--output", str(target),
+        "--merge-output-format", "mp4", "--output", str(target),
     ]
     cookies = os.getenv("OPENPILOT_DOUYIN_COOKIES", "").strip()
     if cookies:
@@ -109,16 +138,14 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
 
 
 def acquire_douyin_batch(query: str, output_dir: Path, limit: int = 10) -> list[tuple[Path, str]]:
-    """Find and download up to ``limit`` accessible Douyin videos.
-
-    Extra candidates are discovered so inaccessible/removed videos can be skipped.
-    Only Douyin URLs are accepted. Optional user-supplied cookies are supported;
-    no CAPTCHA, DRM, credential, watermark, or anti-bot bypass is performed.
-    """
+    """Find and download up to ``limit`` accessible Douyin videos."""
     requested = max(1, int(limit))
     urls = _search_urls(query, limit=requested)
     if not urls:
-        raise RuntimeError(f"No public Douyin video URLs were indexed for '{query}'.")
+        raise RuntimeError(
+            f"No public Douyin video URLs were discovered for '{query}'. "
+            "Douyin/search pages may be temporarily unavailable; try again or provide user cookies."
+        )
 
     successes: list[tuple[Path, str]] = []
     errors: list[str] = []
