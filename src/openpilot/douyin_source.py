@@ -37,7 +37,7 @@ def _extract_urls(page: str, limit: int) -> list[str]:
                 url = "https://jingxuan.douyin.com" + url
             else:
                 url = "https://www.douyin.com" + url
-        if not ("/video/" in url or "/shipin/" in url):
+        if not ("/video/" in url or "/shipin/" in url or "/m/video/" in url):
             return False
         if url not in found:
             found.append(url)
@@ -79,7 +79,18 @@ def _query_variants(query: str) -> list[str]:
     clean = re.sub(r"\s+", " ", query).strip()
     clean = re.sub(r"\s*[-–—|]\s*(Đài Phát thanh.*|VTV.*|Báo.*)$", "", clean, flags=re.I)
     words = clean.split()
-    variants = [clean, " ".join(words[:10]), "抖音 热门", "热门 视频", "热点 视频", "今日热点"]
+    variants = [
+        clean,
+        " ".join(words[:10]),
+        " ".join(words[:6]),
+        "Vietnam",
+        "越南",
+        "越南 热门",
+        "热点 新闻",
+        "热门 视频",
+        "抖音 热门",
+        "今日热点",
+    ]
     return list(dict.fromkeys(v for v in variants if v))
 
 
@@ -101,6 +112,43 @@ def _search_engine_urls(query: str, engine: str, limit: int) -> list[str]:
                         return found
             except Exception:
                 continue
+    return found
+
+
+def _search_google_urls(query: str, limit: int) -> list[str]:
+    """Use ordinary Google indexing as another public discovery source."""
+    found: list[str] = []
+    for term in _query_variants(query):
+        for search in (
+            f"site:douyin.com/video {term}",
+            f"site:jingxuan.douyin.com/m/video {term}",
+        ):
+            url = f"https://www.google.com/search?q={quote_plus(search)}&num=50&hl=en"
+            try:
+                for item in _extract_urls(_fetch(url), limit):
+                    if item not in found:
+                        found.append(item)
+                    if len(found) >= limit:
+                        return found
+            except Exception:
+                continue
+    return found
+
+
+def _search_baidu_urls(query: str, limit: int) -> list[str]:
+    """Use ordinary Baidu indexing; this is discovery only."""
+    found: list[str] = []
+    for term in _query_variants(query):
+        search = f"site:jingxuan.douyin.com/m/video {term}"
+        url = f"https://www.baidu.com/s?wd={quote_plus(search)}&rn=50"
+        try:
+            for item in _extract_urls(_fetch(url), limit):
+                if item not in found:
+                    found.append(item)
+                if len(found) >= limit:
+                    return found
+        except Exception:
+            continue
     return found
 
 
@@ -131,6 +179,7 @@ def _yt_dlp_public_urls(query: str, limit: int) -> list[str]:
     pages = [
         "https://www.douyin.com/shipin/",
         "https://jingxuan.douyin.com/",
+        "https://www.douyin.com/hot",
         f"https://www.douyin.com/search/?type=video&keyword={quote_plus(query)}",
         f"https://www.douyin.com/search/{quote_plus(query)}?type=video",
     ]
@@ -138,11 +187,17 @@ def _yt_dlp_public_urls(query: str, limit: int) -> list[str]:
     for page in pages:
         command = [
             "yt-dlp", "--flat-playlist", "--skip-download",
-            "--print", "%(webpage_url)s", "--playlist-end", str(max(limit * 3, 20)), page,
+            "--print", "%(webpage_url)s", "--playlist-end", str(max(limit * 3, 30)), page,
         ]
         try:
             result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except FileNotFoundError:
+            command[0:1] = [os.environ.get("PYTHON", "python"), "-m", "yt_dlp"]
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        except subprocess.TimeoutExpired:
             continue
         for line in (result.stdout or "").splitlines():
             value = line.strip()
@@ -157,6 +212,7 @@ def _search_douyin_public_pages(limit: int) -> list[str]:
     pages = (
         "https://www.douyin.com/shipin/",
         "https://www.douyin.com/search/?type=video",
+        "https://www.douyin.com/hot",
         "https://www.douyin.com/htmlmap/hotchallenge_0_1",
         "https://jingxuan.douyin.com/",
     )
@@ -174,17 +230,27 @@ def _search_douyin_public_pages(limit: int) -> list[str]:
 
 
 def _search_urls(query: str, limit: int = 10) -> list[str]:
-    candidate_limit = max(limit * 5, 30)
+    candidate_limit = max(limit * 5, 50)
     found: list[str] = []
+
     for url in _search_direct_douyin(query, candidate_limit):
         if url not in found:
             found.append(url)
+
     for engine in ("bing", "duckduckgo"):
         for url in _search_engine_urls(query, engine, candidate_limit):
             if url not in found:
                 found.append(url)
             if len(found) >= candidate_limit:
                 return found[:candidate_limit]
+
+    for searcher in (_search_google_urls, _search_baidu_urls):
+        for url in searcher(query, candidate_limit):
+            if url not in found:
+                found.append(url)
+            if len(found) >= candidate_limit:
+                return found[:candidate_limit]
+
     if len(found) < limit:
         for url in _yt_dlp_public_urls(query, candidate_limit):
             if url not in found:
@@ -211,7 +277,11 @@ def _download_public_url(url: str, output_dir: Path, index: int) -> tuple[Path, 
             raise RuntimeError(f"Douyin cookie file not found: {cookie_path}")
         command.extend(["--cookies", str(cookie_path)])
     command.append(url)
-    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
+    except FileNotFoundError:
+        command[0:1] = [os.environ.get("PYTHON", "python"), "-m", "yt_dlp"]
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=240)
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
         lines = (result.stderr or result.stdout).strip().splitlines()
         detail = lines[-1] if lines else "unknown error"
