@@ -6,6 +6,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,16 +47,35 @@ def _get_json(url: str, headers: dict[str, str] | None = None, api_name: str = "
         raise RuntimeError(f"{api_name} connection error: {exc.reason}") from exc
 
 
+def _discover_trend_from_news(query: str) -> str:
+    """Free trend fallback using Google News RSS; no API key is required."""
+    params = urllib.parse.urlencode({"q": query, "hl": "vi", "gl": "VN", "ceid": "VN:vi"})
+    request = urllib.request.Request(
+        f"https://news.google.com/rss/search?{params}",
+        headers={"User-Agent": "OpenPilot-Studio/0.6"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            root = ET.fromstring(response.read())
+    except (urllib.error.URLError, ET.ParseError) as exc:
+        raise RuntimeError(f"Free trend discovery failed: {exc}") from exc
+    item = root.find("./channel/item/title")
+    title = (item.text or "").strip() if item is not None else ""
+    if not title:
+        raise RuntimeError("Free trend discovery returned no recent topic.")
+    return title
+
+
 def discover_trend() -> str:
-    key = os.getenv("YOUTUBE_API_KEY")
     query = os.getenv("OPENPILOT_TREND_QUERY", "trending vietnam")
+    key = os.getenv("YOUTUBE_API_KEY")
     if not key:
-        raise RuntimeError("Missing YOUTUBE_API_KEY. Add an official YouTube Data API key first.")
+        return _discover_trend_from_news(query)
     params = urllib.parse.urlencode({"part": "snippet", "q": query, "type": "video", "order": "date", "maxResults": "10", "key": key})
     data = _get_json(f"https://www.googleapis.com/youtube/v3/search?{params}", api_name="YouTube API")
     items = data.get("items", [])
     if not items:
-        raise RuntimeError("YouTube API: Trend Engine found no recent videos for the configured query.")
+        return _discover_trend_from_news(query)
     return items[0].get("snippet", {}).get("title", query)
 
 
