@@ -1,22 +1,26 @@
-# OpenPilot
+# OpenPilot Studio 🎬🤖
 
-> **Your open-source, local-first AI coding agent.**
+> **AI Content Factory — biến video bạn có quyền sử dụng thành nội dung tiếng Việt sẵn sàng cho mạng xã hội.**
 
-OpenPilot turns a software task into a safe workflow: **plan → inspect → assist → test → report**.
+OpenPilot Studio is an open-source, local-first content automation layer built on top of the OpenPilot agent. The project is designed around a safe pipeline:
 
-## 🚀 v0.2
+**source → speech-to-text → translation → subtitles → vertical render → approval → publishing**
 
-This release adds:
+## ✨ v0.3 — Content Factory foundation
 
-- 🤖 Optional OpenAI-compatible LLM provider
-- 🐙 Read-only public GitHub repository inspector
-- 🧪 Safe pytest runner (no shell)
-- 🧩 Provider abstraction for future local/cloud models
-- 📦 JSON output for automation
-- 🔐 No automatic shell execution
-- 🏠 Works without an API key using the built-in planner
+- 🎙️ Optional Whisper transcription via `faster-whisper`
+- 🇻🇳 Translation abstraction ready for LLM providers
+- 📝 SRT subtitle generation
+- 📱 9:16 / 1080×1920 social-video rendering with FFmpeg
+- 🔥 Trend-source abstraction for TikTok/Douyin and other sources
+- 📤 Publisher abstraction for TikTok, YouTube Shorts, Facebook Reels and Instagram Reels
+- 🛡️ Dry-run publishing by default
+- ⚖️ Rights-confirmation workflow: only process content you own or are authorized to reuse
+- 🧩 Modular architecture for future AI voice, scoring and official API integrations
 
 ## Quick start
+
+Install the core project:
 
 ```bash
 python -m venv .venv
@@ -28,79 +32,88 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Create a plan:
+For video transcription:
 
 ```bash
-openpilot plan "Analyze this repository and suggest improvements"
+pip install -e ".[media]"
 ```
 
-Inspect a public GitHub repository:
+Install **FFmpeg** and make sure `ffmpeg` and `ffprobe` are available in PATH.
 
-```bash
-openpilot github owner/repo
+Process a video you are authorized to use:
+
+```python
+from openpilot.pipeline import process_video
+
+result = process_video("input.mp4", "output")
+print(result.output_video)
+print(result.subtitle_file)
 ```
-
-Run tests:
-
-```bash
-openpilot test
-```
-
-## Optional AI provider
-
-Set an API key and model through environment variables:
-
-```text
-OPENPILOT_API_KEY=your-key
-OPENPILOT_MODEL=your-model
-OPENPILOT_BASE_URL=https://api.openai.com/v1
-```
-
-Then:
-
-```bash
-openpilot plan "Review the architecture" --ai
-```
-
-The provider uses a standard OpenAI-compatible chat-completions interface, so the adapter can also target compatible gateways or local servers by changing `OPENPILOT_BASE_URL`.
 
 ## Architecture
 
 ```text
+                    OpenPilot Studio
+                           │
+       ┌───────────────────┼───────────────────┐
+       ↓                   ↓                   ↓
+   Trend Engine       AI Language         Video Engine
+       │                   │                   │
+   TikTok/Douyin       STT + LLM            FFmpeg
+   adapters            Translation          Subtitle
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           ↓
+                    Approval Gateway
+                           ↓
+                    Publishing Engine
+                           ↓
+        TikTok / YouTube / Facebook / Instagram
+```
+
+## Project structure
+
+```text
 src/openpilot/
-├── agent.py          # orchestration and report model
-├── planner.py        # deterministic task planning
-├── tools.py          # safe workspace inspection
-├── providers.py      # optional LLM provider adapters
+├── agent.py          # coding-agent orchestration
+├── planner.py        # deterministic planning
+├── providers.py      # OpenAI-compatible LLM provider
+├── trends.py         # trend-source abstraction
+├── transcription.py  # optional Whisper STT
+├── translation.py    # translation interface
+├── subtitles.py      # SRT generation
+├── media.py          # FFmpeg media utilities
+├── pipeline.py       # video processing pipeline
+├── publishers.py     # safe publishing abstraction
 ├── github_tool.py    # read-only GitHub inspection
 ├── test_runner.py    # safe pytest runner
 └── cli.py            # command-line interface
 ```
 
-## Safety model
+## Important safety & platform policy
 
-OpenPilot v0.2 does **not** execute arbitrary shell commands. The built-in test command invokes `python -m pytest -q` without a shell, and the GitHub tool is read-only. Future execution tools should be sandboxed and permission-gated.
+OpenPilot Studio does **not** bypass platform protections, private content, login walls, DRM, or anti-bot systems. Trend discovery is implemented as an adapter so official APIs, licensed feeds, or user-provided sources can be connected later.
+
+Publishing is **dry-run by default**. Production integrations should use official platform APIs and explicit user authorization. The project is intended for content the user owns or has permission to reuse; automation does not grant copyright permission.
 
 ## Roadmap
 
-- [x] v0.1 safe agent skeleton
-- [x] v0.2 provider adapter
-- [x] v0.2 GitHub inspector
-- [x] v0.2 test runner
-- [ ] GitHub issues / pull request analysis
+- [x] v0.3 media pipeline foundation
+- [x] Whisper transcription adapter
+- [x] SRT subtitle generation
+- [x] 9:16 social render
+- [x] trend/publisher interfaces
+- [ ] LLM Vietnamese translation adapter
+- [ ] AI Vietnamese voice/TTS adapter
+- [ ] automatic subtitle burn-in
+- [ ] trend scoring (views, velocity, engagement)
+- [ ] official TikTok publishing adapter
+- [ ] YouTube Shorts publishing adapter
+- [ ] Meta Reels publishing adapter
+- [ ] web dashboard
+- [ ] job queue + scheduler
 - [ ] Docker sandbox
-- [ ] MCP integration
-- [ ] Local model presets
-- [ ] Desktop application
-- [ ] Multi-agent workflows
-
-## Contributing
-
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Security
-
-See [SECURITY.md](SECURITY.md) before reporting vulnerabilities.
+- [ ] analytics and A/B testing
 
 ## License
 
