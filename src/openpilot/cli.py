@@ -25,7 +25,7 @@ def main():
     video.add_argument("--output-dir", default="output")
     video.add_argument("--whisper-model", default="small")
     video.add_argument("--json", action="store_true")
-    auto = sub.add_parser("auto", help="Run trend -> batch video acquisition -> AI Vietnamese -> voice -> 9:16 render -> optional official publishing")
+    auto = sub.add_parser("auto", help="Find Douyin trend videos -> AI Vietnamese -> voice -> 9:16 render -> optional official publishing")
     auto.add_argument("--output-dir", default="output")
     auto.add_argument("--whisper-model", default="small")
     auto.add_argument("--json", action="store_true")
@@ -65,24 +65,24 @@ def main():
         if args.json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
-            print("OpenPilot Studio - AUTO\n")
+            print("\nOpenPilot Studio - AUTO FINAL REPORT\n")
             print(f"Trend:       {result.trend}")
-            print(f"Batch:       {len(result.results)} video")
+            print(f"Batch:       {len(result.results)} Douyin video")
             print(f"Status:      {result.status}")
             print(f"Manifest:    {args.output_dir}\\auto-manifest.json")
-            print(f"\nVideo đầu tiên: {result.output_video}")
-            print(f"Subtitle:      {result.subtitle_file}")
-            print(f"Title:         {result.title}")
-            print(f"Hashtags:      {result.hashtags}")
-            print(f"Publish:       {result.published}")
+            print(f"\nFirst output: {result.output_video}")
+            print(f"Subtitle:     {result.subtitle_file}")
+            print(f"Title:        {result.title}")
+            print(f"Hashtags:     {result.hashtags}")
+            print(f"Publish:      {result.published}")
             print(f"\n{result.message}")
-            print("\nCác video thành công:")
+            print("\nCompleted outputs:")
             for item in result.results:
                 if item["status"] != "failed":
                     print(f"  {item['index']:02d}. {item['output_video']}")
             failed = [item for item in result.results if item["status"] == "failed"]
             if failed:
-                print("\nVideo lỗi:")
+                print("\nFailed videos:")
                 for item in failed:
                     print(f"  {item['index']:02d}. {item['error']}")
 
