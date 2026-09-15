@@ -70,8 +70,15 @@ def _atomic_replace(temp: Path, output: Path) -> None:
 
 
 def _subtitle_filter(srt: Path) -> str:
+    """Compact phone-safe Vietnamese subtitles: clean white text, subtle outline, no oversized box."""
     value = str(srt.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
-    return f"subtitles='{value}':force_style='FontName=Arial,FontSize=18,Outline=2,Shadow=1,MarginV=120,Alignment=2'"
+    style = (
+        "FontName=Arial,FontSize=14,"
+        "Bold=0,Outline=1.2,Shadow=0,"
+        "MarginL=55,MarginR=55,MarginV=92,Alignment=2,"
+        "BorderStyle=1,Spacing=0"
+    )
+    return f"subtitles='{value}':force_style='{style}'"
 
 
 def _atempo_chain(factor: float) -> str:
@@ -119,7 +126,7 @@ def fit_audio_to_duration(voice_path: str | Path, target_seconds: float) -> Path
 
 
 def render_final(input_path: str | Path, subtitle_path: str | Path, voice_path: str | Path, output_path: str | Path) -> Path:
-    """Render a validated 1080x1920 H.264/AAC MP4 with full-video Vietnamese narration."""
+    """Render a validated 1080x1920 H.264/AAC MP4 with compact Vietnamese subtitles."""
     require_ffmpeg()
     source, srt, voice, output = Path(input_path), Path(subtitle_path), Path(voice_path), Path(output_path)
     if not source.exists(): raise MediaError(f"Source video not found: {source}")
