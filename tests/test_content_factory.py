@@ -34,7 +34,7 @@ def test_srt_is_readable_and_sequential(tmp_path: Path):
 
 def test_srt_stays_compact_two_lines(tmp_path: Path):
     segment = TranscriptSegment(0.0, 4.0, "unused")
-    segment.vietnamese = "Đây là một câu tiếng Việt khá dài để kiểm tra rằng phụ đề được chia gọn thành tối đa hai dòng."
+    segment.vietnamese = "Phụ đề tiếng Việt được chia gọn và cân đối trên màn hình."
     target = write_srt([segment], tmp_path / "compact.srt")
     subtitle = target.read_text(encoding="utf-8").split("\n\n")[0].split("\n", 2)[2]
     lines = subtitle.splitlines()
