@@ -105,31 +105,86 @@ def translate_segments(texts: list[str], model: str | None = None) -> list[str]:
     return output
 
 
+def _polish_narration_batch(source: str, model: str | None = None) -> str:
+    """Light editorial pass: improve spoken Vietnamese without inventing or summarising."""
+    prompt = (
+        "Bạn là biên tập viên lời dẫn video Việt Nam. Hãy BIÊN TẬP đoạn SOURCE dưới đây thành lời thuyết minh "
+        "tự nhiên để đọc bằng giọng AI. Đây là biên tập, KHÔNG phải sáng tác.\n"
+        "QUY TẮC BẮT BUỘC:\n"
+        "1. Giữ nguyên thứ tự thông tin và toàn bộ ý quan trọng của SOURCE.\n"
+        "2. Không bịa thêm bất kỳ tên, số liệu, địa điểm, nguyên nhân, nhận xét hoặc kết luận nào.\n"
+        "3. Không tóm tắt và không kéo dài câu chỉ để đủ thời lượng.\n"
+        "4. Xóa từ lặp, lỗi Whisper, tiếng đệm và câu vô nghĩa.\n"
+        "5. Viết như một biên tập viên Việt Nam đang đọc bản tin/phóng sự ngắn: rõ ràng, hiện đại, chắc câu, không văn vẻ.\n"
+        "6. Câu chủ động, ngắn vừa phải; ưu tiên 8-20 từ mỗi câu.\n"
+        "7. Không dùng các câu sáo rỗng như 'hãy cùng khám phá', 'điều đáng chú ý là', 'không thể bỏ qua' nếu SOURCE không có nội dung tương ứng.\n"
+        "8. Không dùng tiêu đề, bullet, emoji, hashtag, lời kêu gọi tương tác.\n"
+        "9. Nếu một câu trong SOURCE không chắc nghĩa, giữ cách diễn đạt trung tính thay vì đoán.\n"
+        "Trả JSON CHÍNH XÁC: {\"narration\":\"...\"}.\n"
+        "SOURCE:\n" + source
+    )
+    result = _chat_json(prompt, model)
+    return " ".join(str(result.get("narration") or "").split()).strip()
+
+
+def _quality_check_narration(text: str) -> str:
+    clean = " ".join(text.split()).strip()
+    if not clean:
+        raise RuntimeError("AI narration returned empty text.")
+    words = clean.split()
+    if len(words) < 8:
+        raise RuntimeError("AI narration is too short to be a useful full-video voice-over.")
+    # Reject obvious model artifacts before they reach TTS.
+    bad_markers = ("[narration]", "[voiceover]", "json:", "here is", "đây là bản thuyết minh:")
+    lowered = clean.casefold()
+    if any(marker in lowered for marker in bad_markers):
+        raise RuntimeError("AI narration contains a formatting artifact.")
+    # Remove accidental repeated adjacent sentences/phrases.
+    sentences = [x.strip() for x in __import__("re").split(r"(?<=[.!?…])\s+", clean) if x.strip()]
+    deduped: list[str] = []
+    for sentence in sentences:
+        if not deduped or sentence.casefold() != deduped[-1].casefold():
+            deduped.append(sentence)
+    return " ".join(deduped)
+
+
 def generate_narration(source_text: str, duration_seconds: float, model: str | None = None) -> str:
-    """Create a polished Vietnamese voice-over that intentionally covers the full video."""
+    """Create a factual, spoken Vietnamese narration without forcing the model to invent filler."""
     source_text = " ".join(source_text.split()).strip()
     duration = max(5.0, float(duration_seconds or 5.0))
     if not source_text:
         raise RuntimeError("Cannot create narration from empty source text.")
 
-    target_words = max(18, int(duration * 2.05))
-    prompt = (
-        "Bạn là biên tập viên nội dung video ngắn cấp cao và người viết lời thuyết minh tiếng Việt. "
-        "Hãy chuyển SOURCE thành MỘT bài thuyết minh tiếng Việt hiện đại, chuyên nghiệp, tự nhiên và có nhịp kể rõ ràng cho TOÀN BỘ video. "
-        "Đây là lời thuyết minh để đọc bằng TTS, không phải bản dịch từng chữ và cũng không phải bản tóm tắt. "
-        "Giữ lại toàn bộ thông tin quan trọng có trong SOURCE; loại bỏ lỗi Whisper, từ lặp, tiếng đệm và phần vô nghĩa. "
-        "Không được bịa tên, số liệu, địa điểm, sự kiện, nguyên nhân, kết luận hay ý kiến. "
-        "Ưu tiên câu ngắn, câu tiếng Việt chuẩn, từ ngữ hiện đại nhưng không lạm dụng khẩu ngữ. "
-        "Không dùng tiêu đề, gạch đầu dòng, emoji, hashtag, lời dẫn sân khấu hoặc ngoặc kép. "
-        "Mở đầu tự nhiên, đi thẳng vào nội dung; chuyển ý mượt; kết thúc gọn, không thêm lời kêu gọi sáo rỗng. "
-        f"Video dài {duration:.1f} giây. Tạo khoảng {target_words} từ tiếng Việt, tương đương khoảng 2.05 từ/giây, "
-        "đủ dài để lời nói bao phủ toàn bộ video nhưng không nói quá dồn dập. "
-        "Trả JSON CHÍNH XÁC dạng {\"narration\":\"...\"}.\nSOURCE:\n" + source_text
-    )
-    result = _chat_json(prompt, model)
-    narration = " ".join(str(result.get("narration") or "").split()).strip()
-    if not narration:
-        raise RuntimeError("AI narration returned empty text.")
+    # Long one-shot prompts were producing awkward prose on small local models.
+    # Work in small editorial blocks, then join them in source order.
+    sentences = [x.strip() for x in __import__("re").split(r"(?<=[.!?…])\s+", source_text) if x.strip()]
+    if not sentences:
+        sentences = [source_text]
+    blocks: list[str] = []
+    current: list[str] = []
+    current_words = 0
+    for sentence in sentences:
+        count = len(sentence.split())
+        if current and current_words + count > 90:
+            blocks.append(" ".join(current)); current = []; current_words = 0
+        current.append(sentence); current_words += count
+    if current:
+        blocks.append(" ".join(current))
+
+    polished: list[str] = []
+    for block in blocks:
+        edited = _polish_narration_batch(block, model)
+        if edited:
+            polished.append(edited)
+    narration = _quality_check_narration(" ".join(polished))
+
+    # If the model is asked for an enormous expansion, the result becomes padded and unnatural.
+    # Keep a soft duration sanity check rather than forcing an exact word count.
+    max_words = max(20, int(duration * 2.8))
+    if len(narration.split()) > max_words:
+        trim = _polish_narration_batch(narration, model)
+        if trim and len(trim.split()) <= max_words:
+            narration = trim
     return narration
 
 
@@ -202,7 +257,8 @@ def _pyttsx3_speech(text: str, output_file: str | Path) -> Path:
         raise RuntimeError("Install pyttsx3 with: pip install pyttsx3") from exc
     target = Path(output_file); target.parent.mkdir(parents=True, exist_ok=True)
     engine = pyttsx3.init()
-    engine.setProperty("rate", int(os.getenv("OPENPILOT_TTS_RATE", "175")))
+    engine.setProperty("rate", int(os.getenv("OPENPILOT_TTS_RATE", "165")))
+    engine.setProperty("volume", float(os.getenv("OPENPILOT_TTS_VOLUME", "1.0")))
     engine.save_to_file(text, str(target)); engine.runAndWait()
     if not target.exists() or target.stat().st_size < 1024:
         raise RuntimeError("Windows system TTS did not create a usable audio file.")
