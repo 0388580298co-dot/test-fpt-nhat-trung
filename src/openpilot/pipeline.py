@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -22,35 +23,42 @@ class PipelineResult:
 
 
 def _split_narration(text: str) -> list[str]:
+    """Create short, natural subtitle phrases instead of long paragraph-sized captions."""
     clean = " ".join(text.split())
+    if not clean:
+        return []
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", clean) if part.strip()]
     parts: list[str] = []
-    current = ""
-    for token in clean.replace("!", ".").replace("?", ".").replace(";", ".").split("."):
-        token = token.strip()
-        if not token:
-            continue
-        current = f"{current} {token}".strip()
-        if len(current) >= 55:
-            parts.append(current)
-            current = ""
-    if current:
-        parts.append(current)
-    return parts or ([clean] if clean else [])
+    for sentence in sentences:
+        words = sentence.split()
+        current: list[str] = []
+        for word in words:
+            candidate = " ".join(current + [word])
+            if current and len(candidate) > 48:
+                parts.append(" ".join(current))
+                current = [word]
+            else:
+                current.append(word)
+        if current:
+            parts.append(" ".join(current))
+    return parts or [clean]
 
 
 def _timed_narration(text: str, duration: float) -> list[TranscriptSegment]:
-    sentences = _split_narration(text)
-    if not sentences:
+    chunks = _split_narration(text)
+    if not chunks:
         return []
-    weights = [max(1, len(x)) for x in sentences]
+    total = max(5.0, float(duration))
+    # Use word count rather than raw character count so timing follows spoken rhythm.
+    weights = [max(1, len(x.split())) for x in chunks]
     total_weight = sum(weights)
     cursor = 0.0
     result: list[TranscriptSegment] = []
-    for index, sentence in enumerate(sentences):
-        end = duration if index == len(sentences) - 1 else cursor + duration * weights[index] / total_weight
-        segment = TranscriptSegment(cursor, min(duration, end), sentence)
-        segment.vietnamese = sentence
-        result.append(segment)
+    for index, chunk in enumerate(chunks):
+        span = total * weights[index] / total_weight
+        end = total if index == len(chunks) - 1 else min(total, cursor + span)
+        result.append(TranscriptSegment(cursor, end, chunk))
+        result[-1].vietnamese = chunk
         cursor = end
     return result
 
