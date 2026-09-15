@@ -30,3 +30,13 @@ def test_srt_is_readable_and_sequential(tmp_path: Path):
     assert "2\n00:00:02,200 --> 00:00:05,500" in text
     assert "Xin chào mọi người" in text
     assert target.exists()
+
+
+def test_srt_stays_compact_two_lines(tmp_path: Path):
+    segment = TranscriptSegment(0.0, 4.0, "unused")
+    segment.vietnamese = "Đây là một câu tiếng Việt khá dài để kiểm tra rằng phụ đề được chia gọn thành tối đa hai dòng."
+    target = write_srt([segment], tmp_path / "compact.srt")
+    subtitle = target.read_text(encoding="utf-8").split("\n\n")[0].split("\n", 2)[2]
+    lines = subtitle.splitlines()
+    assert 1 <= len(lines) <= 2
+    assert all(len(line) <= 34 for line in lines)
