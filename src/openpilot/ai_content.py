@@ -79,10 +79,13 @@ def _chat_json(prompt: str, model: str | None = None) -> dict:
 def _translate_batch(texts: list[str], model: str | None = None) -> list[str]:
     payload = json.dumps(texts, ensure_ascii=False)
     prompt = (
-        "You are a professional Vietnamese subtitle translator. Translate each item independently into "
-        "natural spoken Vietnamese. Preserve names, numbers, tone and factual meaning. Do not summarize, "
-        "merge, invent, or add explanations. If a source item is clearly noise or meaningless ASR, return "
-        "an empty string for that item. Return JSON exactly {\"items\":[string,...]} with the same count.\n"
+        "Bạn là biên tập viên phụ đề tiếng Việt chuyên nghiệp cho video ngắn. "
+        "Dịch từng mục sang tiếng Việt TỰ NHIÊN, dễ nghe khi đọc thành tiếng, giống cách người Việt nói hằng ngày. "
+        "Không dịch từng từ theo kiểu máy móc. Giữ đúng chủ thể, tên riêng, số liệu, địa danh, thời gian và ý chính. "
+        "Có thể đổi trật tự từ để câu tiếng Việt tự nhiên hơn nhưng tuyệt đối không được tự thêm thông tin. "
+        "Loại bỏ tiếng đệm, lặp từ, lỗi nhận dạng giọng nói và câu vô nghĩa. Không tóm tắt. Không ghép các mục với nhau. "
+        "Mỗi mục chỉ trả về một câu hoặc cụm câu ngắn, có dấu câu tiếng Việt chuẩn. Nếu mục là tiếng ồn hoặc ASR không thể hiểu, trả về chuỗi rỗng. "
+        "Trả JSON CHÍNH XÁC dạng {\"items\":[string,...]} và phải có đúng số lượng mục đầu vào.\n"
         f"ITEMS={payload}"
     )
     result = _chat_json(prompt, model)
@@ -109,19 +112,19 @@ def generate_narration(source_text: str, duration_seconds: float, model: str | N
     if not source_text:
         raise RuntimeError("Cannot create narration from empty source text.")
 
-    # Vietnamese narration at a calm social-video pace is roughly 2.1-2.4 words/sec.
-    target_words = max(18, int(duration * 2.25))
+    target_words = max(18, int(duration * 2.05))
     prompt = (
-        "You are a senior Vietnamese short-form video narrator and editor. Rewrite the SOURCE into ONE "
-        "continuous, modern, professional Vietnamese voice-over for the ENTIRE video. This is narration, "
-        "not a literal translation and not a summary. Preserve every important factual detail present in "
-        "the source, but remove ASR noise, repetition and filler. Do not invent names, numbers, places, "
-        "events, opinions or facts. Use a natural Vietnamese spoken style: confident, concise, contemporary, "
-        "engaging, with smooth transitions and short sentences. No headings, bullets, emojis, hashtags, "
-        "stage directions or quotation marks. Start with a strong but factual opening, explain what viewers "
-        "are seeing, and finish with a natural closing sentence. The narration must be long enough to cover "
-        f"the FULL {duration:.1f}-second video at about 2.25 Vietnamese words/second: target about {target_words} words. "
-        "Return JSON exactly {\"narration\":\"...\"}.\nSOURCE:\n" + source_text
+        "Bạn là biên tập viên nội dung video ngắn cấp cao và người viết lời thuyết minh tiếng Việt. "
+        "Hãy chuyển SOURCE thành MỘT bài thuyết minh tiếng Việt hiện đại, chuyên nghiệp, tự nhiên và có nhịp kể rõ ràng cho TOÀN BỘ video. "
+        "Đây là lời thuyết minh để đọc bằng TTS, không phải bản dịch từng chữ và cũng không phải bản tóm tắt. "
+        "Giữ lại toàn bộ thông tin quan trọng có trong SOURCE; loại bỏ lỗi Whisper, từ lặp, tiếng đệm và phần vô nghĩa. "
+        "Không được bịa tên, số liệu, địa điểm, sự kiện, nguyên nhân, kết luận hay ý kiến. "
+        "Ưu tiên câu ngắn, câu tiếng Việt chuẩn, từ ngữ hiện đại nhưng không lạm dụng khẩu ngữ. "
+        "Không dùng tiêu đề, gạch đầu dòng, emoji, hashtag, lời dẫn sân khấu hoặc ngoặc kép. "
+        "Mở đầu tự nhiên, đi thẳng vào nội dung; chuyển ý mượt; kết thúc gọn, không thêm lời kêu gọi sáo rỗng. "
+        f"Video dài {duration:.1f} giây. Tạo khoảng {target_words} từ tiếng Việt, tương đương khoảng 2.05 từ/giây, "
+        "đủ dài để lời nói bao phủ toàn bộ video nhưng không nói quá dồn dập. "
+        "Trả JSON CHÍNH XÁC dạng {\"narration\":\"...\"}.\nSOURCE:\n" + source_text
     )
     result = _chat_json(prompt, model)
     narration = " ".join(str(result.get("narration") or "").split()).strip()
