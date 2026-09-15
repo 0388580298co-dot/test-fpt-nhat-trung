@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -148,38 +149,41 @@ def _translate_transcript(segments: list[TranscriptSegment]) -> list[TranscriptS
 
 
 def _split_narration(text: str) -> list[str]:
+    """Split narration into short subtitle phrases with natural punctuation boundaries."""
     clean = " ".join(text.split())
     if not clean:
         return []
-    parts = []
-    current = ""
-    for token in clean.replace("!", ".").replace("?", ".").replace(";", ".").split("."):
-        token = token.strip()
-        if token:
-            current = f"{current} {token}".strip()
-            # Keep subtitle chunks comfortably readable.
-            if len(current) >= 55:
-                parts.append(current)
-                current = ""
-    if current:
-        parts.append(current)
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", clean) if part.strip()]
+    parts: list[str] = []
+    for sentence in sentences:
+        words = sentence.split()
+        current: list[str] = []
+        for word in words:
+            candidate = " ".join(current + [word])
+            if current and len(candidate) > 48:
+                parts.append(" ".join(current))
+                current = [word]
+            else:
+                current.append(word)
+        if current:
+            parts.append(" ".join(current))
     return parts or [clean]
 
 
 def _segments_from_script(text: str, duration: float | None) -> list[TranscriptSegment]:
-    sentences = _split_narration(text)
-    if not sentences:
+    chunks = _split_narration(text)
+    if not chunks:
         return []
     total = max(float(duration or 5.0), 5.0)
-    weights = [max(1, len(x)) for x in sentences]
+    weights = [max(1, len(x.split())) for x in chunks]
     weight_total = sum(weights)
     cursor = 0.0
     result: list[TranscriptSegment] = []
-    for index, sentence in enumerate(sentences):
+    for index, chunk in enumerate(chunks):
         span = total * weights[index] / weight_total
-        end = total if index == len(sentences) - 1 else min(total, cursor + span)
-        segment = TranscriptSegment(cursor, end, sentence)
-        segment.vietnamese = sentence
+        end = total if index == len(chunks) - 1 else min(total, cursor + span)
+        segment = TranscriptSegment(cursor, end, chunk)
+        segment.vietnamese = chunk
         result.append(segment)
         cursor = end
     return result
@@ -270,7 +274,7 @@ def run_auto(output_dir: str = "output", whisper_model: str = "small") -> AutoRe
     success = sum(r["status"] in {"ready_for_publish", "published"} for r in results)
     failed = len(results) - success
     manifest_path = out / "auto-manifest.json"
-    manifest_path.write_text(json.dumps({"version": "0.8", "trend": trend, "source_policy": "douyin_only", "minimum_duration_exclusive_seconds": 10, "narration": {"enabled": True, "style": "modern_professional_full_video", "target_words_per_second": 2.25}, "requested": target, "acquired": len(videos), "completed": success, "failed": failed, "publish_mode": publish_mode, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps({"version": "0.9", "trend": trend, "source_policy": "douyin_only", "minimum_duration_exclusive_seconds": 10, "narration": {"enabled": True, "style": "modern_professional_full_video", "target_words_per_second": 2.05, "subtitle_style": "compact_two_line_34_char_max"}, "requested": target, "acquired": len(videos), "completed": success, "failed": failed, "publish_mode": publish_mode, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     ui.phase(8, "FINAL REPORT", "Batch processing finished"); ui.finish(success, failed)
     first = next((r for r in results if r["status"] != "failed"), results[0] if results else {})
