@@ -14,7 +14,8 @@ def test_hashtags_are_unique_and_bounded():
 
 
 def test_title_cleanup():
-    assert _clean_title('  "Tiêu đề\nđẹp!!!"  ', "fallback") == "Tiêu đề đẹp!!!"
+    # Professional titles should drop noisy trailing punctuation/quotes.
+    assert _clean_title('  "Tiêu đề\nđẹp!!!"  ', "fallback") == "Tiêu đề đẹp"
 
 
 def test_srt_is_readable_and_sequential(tmp_path: Path):
